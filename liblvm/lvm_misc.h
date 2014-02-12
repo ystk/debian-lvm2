@@ -14,16 +14,14 @@
 #ifndef _LVM2APP_MISC_H
 #define _LVM2APP_MISC_H
 
-#include "lib.h"
+#include "libdevmapper.h"
 #include "lvm2app.h"
-#include "toolcontext.h"
-#include "metadata-exported.h"
-#include "archiver.h"
-#include "locking.h"
-#include "lvm-string.h"
-#include "lvmcache.h"
-#include "metadata.h"
 
 struct dm_list *tag_list_copy(struct dm_pool *p, struct dm_list *tag_list);
+struct lvm_property_value get_property(const pv_t pv, const vg_t vg,
+				       const lv_t lv, const lvseg_t lvseg,
+				       const pvseg_t pvseg, const char *name);
+int set_property(const pv_t pv, const vg_t vg, const lv_t lv,
+		 const char *name, struct lvm_property_value *value);
 
 #endif

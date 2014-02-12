@@ -104,7 +104,7 @@ int lvrename(struct cmd_context *cmd, int argc, char **argv)
 	log_verbose("Checking for existing volume group \"%s\"", vg_name);
 	vg = vg_read_for_update(cmd, vg_name, NULL, 0);
 	if (vg_read_error(vg)) {
-		vg_release(vg);
+		release_vg(vg);
 		stack;
 		return ECMD_FAILED;
 	}
@@ -112,6 +112,21 @@ int lvrename(struct cmd_context *cmd, int argc, char **argv)
 	if (!(lvl = find_lv_in_vg(vg, lv_name_old))) {
 		log_error("Existing logical volume \"%s\" not found in "
 			  "volume group \"%s\"", lv_name_old, vg_name);
+		goto error;
+	}
+
+	if (lvl->lv->status & (RAID_IMAGE | RAID_META)) {
+		log_error("Cannot rename a RAID %s directly",
+			  (lvl->lv->status & RAID_IMAGE) ? "image" :
+			  "metadata area");
+		r = ECMD_FAILED;
+		goto error;
+	}
+
+	if (lv_is_raid_with_tracking(lvl->lv)) {
+		log_error("Cannot rename %s while it is tracking a split image",
+			  lvl->lv->name);
+		r = ECMD_FAILED;
 		goto error;
 	}
 

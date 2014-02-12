@@ -17,6 +17,7 @@
 #define _LVM_DEV_CACHE_H
 
 #include "device.h"
+#include "lvm-wrappers.h"
 
 /*
  * predicate for devices.
@@ -24,6 +25,7 @@
 struct dev_filter {
 	int (*passes_filter) (struct dev_filter * f, struct device * dev);
 	void (*destroy) (struct dev_filter * f);
+	unsigned use_count;
 	void *private;
 };
 
@@ -42,6 +44,9 @@ int dev_cache_add_dir(const char *path);
 int dev_cache_add_loopfile(const char *path);
 struct device *dev_cache_get(const char *name, struct dev_filter *f);
 
+// TODO
+struct device *dev_cache_get_by_devt(dev_t device, struct dev_filter *f);
+
 void dev_set_preferred_name(struct str_list *sl, struct device *dev);
 
 /*
@@ -51,5 +56,7 @@ struct dev_iter;
 struct dev_iter *dev_iter_create(struct dev_filter *f, int dev_scan);
 void dev_iter_destroy(struct dev_iter *iter);
 struct device *dev_iter_get(struct dev_iter *iter);
+
+void dev_reset_error_count(struct cmd_context *cmd);
 
 #endif

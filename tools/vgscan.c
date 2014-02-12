@@ -17,7 +17,7 @@
 
 static int vgscan_single(struct cmd_context *cmd, const char *vg_name,
 			 struct volume_group *vg,
-			 void *handle __attribute((unused)))
+			 void *handle __attribute__((unused)))
 {
 	log_print("Found %svolume group \"%s\" using metadata type %s",
 		  vg_is_exported(vg) ? "exported " : "", vg_name,
@@ -25,12 +25,16 @@ static int vgscan_single(struct cmd_context *cmd, const char *vg_name,
 
 	check_current_backup(vg);
 
+	/* keep lvmetad up to date */
+	if (!lvmetad_vg_update(vg))
+		stack;
+
 	return ECMD_PROCESSED;
 }
 
 int vgscan(struct cmd_context *cmd, int argc, char **argv)
 {
-	int maxret, ret;
+	int maxret, ret, lvmetad;
 
 	if (argc) {
 		log_error("Too many parameters on command line");
@@ -44,6 +48,8 @@ int vgscan(struct cmd_context *cmd, int argc, char **argv)
 
 	persistent_filter_wipe(cmd->filter);
 	lvmcache_destroy(cmd, 1);
+	lvmetad = lvmetad_active();
+	lvmetad_set_active(0); /* do not rely on lvmetad info */
 
 	log_print("Reading all physical volumes.  This may take a while...");
 
@@ -56,6 +62,7 @@ int vgscan(struct cmd_context *cmd, int argc, char **argv)
 			maxret = ret;
 	}
 
+	lvmetad_set_active(lvmetad); /* restore */
 	unlock_vg(cmd, VG_GLOBAL);
 	return maxret;
 }

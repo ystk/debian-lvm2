@@ -3,19 +3,33 @@
 pvscan \- scan all disks for physical volumes
 .SH SYNOPSIS
 .B pvscan
-.RB [ \-d | \-\-debug]
-.RB [\-e | \-\-exported]
-.RB [\-h | \-\-help]
-.RB [\-\-ignorelockingfailure]
-.RB [ \-n | \-\-novolumegroup]
-.RB [\-s | \-\-short]
-.RB [\-u | \-\-uuid]
-.RB [ \-v [ v ]| \-\-verbose " [" \-\-verbose ]]
+.RB [ \-d | \-\-debug ]
+.RB [ \-h | \-\-help ]
+.RB [ \-v | \-\-verbose ]
+.RB [ \-\-version ]
+.RB [ \-\-ignorelockingfailure ]
+.RB [ \-e | \-\-exported ]
+.RB [ \-n | \-\-novolumegroup ]
+.RB [ \-s | \-\-short ]
+.RB [ \-u | \-\-uuid ]
+.BR
+
+.B pvscan
+.RB [ \-d | \-\-debug ]
+.RB [ \-h | \-\-help ]
+.RB \-\-cache
+.RB [ \-\-major
+.IR major
+.RB \-\-minor
+.IR minor
+|
+.RI DevicePath 
+] ...
 .SH DESCRIPTION
 .B pvscan
 scans all supported LVM block devices in the system for physical volumes.
 .SH OPTIONS
-See \fBlvm\fP for common options.
+See \fBlvm\fP(8) for common options.
 .TP
 .BR \-e ", " \-\-exported
 Only show physical volumes belonging to exported volume groups.
@@ -28,6 +42,12 @@ Short listing format.
 .TP
 .BR \-u ", " \-\-uuid
 Show UUIDs (Uniform Unique Identifiers) in addition to device special names.
+.TP
+.BR \-\-cache " " [ " " \-\-major " " major " " \-\-minor " " minor " " | " " DevicePath " " ] " " ...
+Scan one or more devices and instruct the lvmetad daemon to update its cached
+state accordingly.  Called internally by udev rules.
+All devices listed explicitly are processed \fBregardless\fP of any device
+filters set in lvm.conf.
 .SH SEE ALSO
 .BR lvm (8),
 .BR pvcreate (8),

@@ -45,6 +45,7 @@ static const struct flag _pv_flags[] = {
 	{ALLOCATABLE_PV, "ALLOCATABLE", STATUS_FLAG},
 	{EXPORTED_VG, "EXPORTED", STATUS_FLAG},
 	{MISSING_PV, "MISSING", COMPATIBLE_FLAG},
+	{UNLABELLED_PV, NULL, 0},
 	{0, NULL, 0}
 };
 
@@ -55,18 +56,27 @@ static const struct flag _lv_flags[] = {
 	{VISIBLE_LV, "VISIBLE", STATUS_FLAG},
 	{PVMOVE, "PVMOVE", STATUS_FLAG},
 	{LOCKED, "LOCKED", STATUS_FLAG},
-	{MIRROR_NOTSYNCED, "NOTSYNCED", STATUS_FLAG},
+	{LV_NOTSYNCED, "NOTSYNCED", STATUS_FLAG},
+	{LV_REBUILD, "REBUILD", STATUS_FLAG},
+	{RAID, NULL, 0},
+	{RAID_META, NULL, 0},
+	{RAID_IMAGE, NULL, 0},
 	{MIRROR_IMAGE, NULL, 0},
 	{MIRROR_LOG, NULL, 0},
 	{MIRRORED, NULL, 0},
 	{VIRTUAL, NULL, 0},
 	{SNAPSHOT, NULL, 0},
 	{MERGING, NULL, 0},
-	{ACTIVATE_EXCL, NULL, 0},
 	{CONVERTING, NULL, 0},
 	{PARTIAL_LV, NULL, 0},
 	{POSTORDER_FLAG, NULL, 0},
 	{VIRTUAL_ORIGIN, NULL, 0},
+	{REPLICATOR, NULL, 0},
+	{REPLICATOR_LOG, NULL, 0},
+	{THIN_VOLUME, NULL, 0},
+	{THIN_POOL, NULL, 0},
+	{THIN_POOL_DATA, NULL, 0},
+	{THIN_POOL_METADATA, NULL, 0},
 	{0, NULL, 0}
 };
 
@@ -136,7 +146,7 @@ int print_flags(uint64_t status, int type, char *buffer, size_t size)
 	return 1;
 }
 
-int read_flags(uint64_t *status, int type, struct config_value *cv)
+int read_flags(uint64_t *status, int type, const struct dm_config_value *cv)
 {
 	int f;
 	uint64_t s = UINT64_C(0);
@@ -145,11 +155,11 @@ int read_flags(uint64_t *status, int type, struct config_value *cv)
 	if (!(flags = _get_flags(type)))
 		return_0;
 
-	if (cv->type == CFG_EMPTY_ARRAY)
+	if (cv->type == DM_CFG_EMPTY_ARRAY)
 		goto out;
 
 	while (cv) {
-		if (cv->type != CFG_STRING) {
+		if (cv->type != DM_CFG_STRING) {
 			log_error("Status value is not a string.");
 			return 0;
 		}

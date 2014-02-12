@@ -19,7 +19,7 @@
 #include <signal.h>
 #include <sys/wait.h>
 
-static void _sigchld_handler(int sig __attribute((unused)))
+static void _sigchld_handler(int sig __attribute__((unused)))
 {
 	while (wait4(-1, NULL, WNOHANG | WUNTRACED, NULL) > 0) ;
 }
@@ -32,6 +32,8 @@ static void _sigchld_handler(int sig __attribute((unused)))
  */
 static int _become_daemon(struct cmd_context *cmd)
 {
+	static const char devnull[] = "/dev/null";
+	int null_fd;
 	pid_t pid;
 	struct sigaction act = {
 		{_sigchld_handler},
@@ -41,6 +43,8 @@ static int _become_daemon(struct cmd_context *cmd)
 	log_verbose("Forking background process");
 
 	sigaction(SIGCHLD, &act, NULL);
+
+	sync_local_dev_names(cmd); /* Flush ops and reset dm cookie */
 
 	if ((pid = fork()) == -1) {
 		log_error("fork failed: %s", strerror(errno));
@@ -55,16 +59,33 @@ static int _become_daemon(struct cmd_context *cmd)
 	if (setsid() == -1)
 		log_error("Background process failed to setsid: %s",
 			  strerror(errno));
+
+	/* For poll debugging it's best to disable for compilation */
+#if 1
+	if ((null_fd = open(devnull, O_RDWR)) == -1) {
+		log_sys_error("open", devnull);
+		_exit(ECMD_FAILED);
+	}
+
+	if ((dup2(null_fd, STDIN_FILENO) < 0)  || /* reopen stdin */
+	    (dup2(null_fd, STDOUT_FILENO) < 0) || /* reopen stdout */
+	    (dup2(null_fd, STDERR_FILENO) < 0)) { /* reopen stderr */
+		log_sys_error("dup2", "redirect");
+		(void) close(null_fd);
+		_exit(ECMD_FAILED);
+	}
+
+	if (null_fd > STDERR_FILENO)
+		(void) close(null_fd);
+
 	init_verbose(VERBOSE_BASE_LEVEL);
-
-	close(STDIN_FILENO);
-	close(STDOUT_FILENO);
-	close(STDERR_FILENO);
-
+#endif
 	strncpy(*cmd->argv, "(lvm2)", strlen(*cmd->argv));
 
 	reset_locking();
-	lvmcache_init();
+	if (!lvmcache_init())
+		/* FIXME Clean up properly here */
+		_exit(ECMD_FAILED);
 	dev_close_all();
 
 	return 1;
@@ -74,29 +95,29 @@ progress_t poll_mirror_progress(struct cmd_context *cmd,
 				struct logical_volume *lv, const char *name,
 				struct daemon_parms *parms)
 {
-	float segment_percent = 0.0, overall_percent = 0.0;
-	percent_range_t percent_range, overall_percent_range;
+	percent_t segment_percent = PERCENT_0, overall_percent = PERCENT_0;
 	uint32_t event_nr = 0;
 
-	if (!lv_mirror_percent(cmd, lv, !parms->interval, &segment_percent,
-			       &percent_range, &event_nr) ||
-	    (percent_range == PERCENT_INVALID)) {
+	if (!lv_is_mirrored(lv) ||
+	    !lv_mirror_percent(cmd, lv, !parms->interval, &segment_percent,
+			       &event_nr) ||
+	    (segment_percent == PERCENT_INVALID)) {
 		log_error("ABORTING: Mirror percentage check failed.");
 		return PROGRESS_CHECK_FAILED;
 	}
 
-	overall_percent = copy_percent(lv, &overall_percent_range);
+	overall_percent = copy_percent(lv);
 	if (parms->progress_display)
 		log_print("%s: %s: %.1f%%", name, parms->progress_title,
-			  overall_percent);
+			  percent_to_float(overall_percent));
 	else
 		log_verbose("%s: %s: %.1f%%", name, parms->progress_title,
-			    overall_percent);
+			    percent_to_float(overall_percent));
 
-	if (percent_range != PERCENT_100)
+	if (segment_percent != PERCENT_100)
 		return PROGRESS_UNFINISHED;
 
-	if (overall_percent_range == PERCENT_100)
+	if (overall_percent == PERCENT_100)
 		return PROGRESS_FINISHED_ALL;
 
 	return PROGRESS_FINISHED_SEGMENT;
@@ -120,8 +141,10 @@ static int _check_lv_status(struct cmd_context *cmd,
 				  "can't abort.");
 			return 0;
 		}
-		parms->poll_fns->finish_copy(cmd, vg, lv, lvs_changed);
-		return 0;
+		if (!parms->poll_fns->finish_copy(cmd, vg, lv, lvs_changed))
+			return_0;
+
+		return 1;
 	}
 
 	progress = parms->poll_fns->poll_progress(cmd, lv, name, parms);
@@ -142,7 +165,7 @@ static int _check_lv_status(struct cmd_context *cmd,
 	/* Finished? Or progress to next segment? */
 	if (progress == PROGRESS_FINISHED_ALL) {
 		if (!parms->poll_fns->finish_copy(cmd, vg, lv, lvs_changed))
-			return 0;
+			return_0;
 	} else {
 		if (parms->poll_fns->update_metadata &&
 		    !parms->poll_fns->update_metadata(cmd, vg, lv, lvs_changed, 0)) {
@@ -181,14 +204,22 @@ static int _wait_for_single_lv(struct cmd_context *cmd, const char *name, const 
 		/* Locks the (possibly renamed) VG again */
 		vg = parms->poll_fns->get_copy_vg(cmd, name, uuid);
 		if (vg_read_error(vg)) {
-			vg_release(vg);
+			release_vg(vg);
 			log_error("ABORTING: Can't reread VG for %s", name);
 			/* What more could we do here? */
 			return 0;
 		}
 
-		if (!(lv = parms->poll_fns->get_copy_lv(cmd, vg, name, uuid,
-							parms->lv_type))) {
+		lv = parms->poll_fns->get_copy_lv(cmd, vg, name, uuid, parms->lv_type);
+
+		if (!lv && parms->lv_type == PVMOVE) {
+			log_print("%s: no pvmove in progress - already finished or aborted.",
+				  name);
+			unlock_and_release_vg(cmd, vg, vg->name);
+			return 1;
+		}
+
+		if (!lv) {
 			log_error("ABORTING: Can't find LV in %s for %s",
 				  vg->name, name);
 			unlock_and_release_vg(cmd, vg, vg->name);
@@ -197,7 +228,7 @@ static int _wait_for_single_lv(struct cmd_context *cmd, const char *name, const 
 
 		if (!_check_lv_status(cmd, vg, lv, name, parms, &finished)) {
 			unlock_and_release_vg(cmd, vg, vg->name);
-			return 0;
+			return_0;
 		}
 
 		unlock_and_release_vg(cmd, vg, vg->name);
@@ -234,8 +265,10 @@ static int _poll_vg(struct cmd_context *cmd, const char *vgname,
 		lv = lvl->lv;
 		if (!(lv->status & parms->lv_type))
 			continue;
-		if (!(name = parms->poll_fns->get_copy_name_from_lv(lv)))
+		name = parms->poll_fns->get_copy_name_from_lv(lv);
+		if (!name && !parms->aborting)
 			continue;
+
 		/* FIXME Need to do the activation from _set_up_pvmove here
 		 *       if it's not running and we're not aborting */
 		if (_check_lv_status(cmd, vg, lv, name, parms, &finished) &&
@@ -267,7 +300,7 @@ static void _poll_for_all_vgs(struct cmd_context *cmd,
  */
 int poll_daemon(struct cmd_context *cmd, const char *name, const char *uuid,
 		unsigned background,
-		uint32_t lv_type, struct poll_functions *poll_fns,
+		uint64_t lv_type, struct poll_functions *poll_fns,
 		const char *progress_title)
 {
 	struct daemon_parms parms;
@@ -277,7 +310,7 @@ int poll_daemon(struct cmd_context *cmd, const char *name, const char *uuid,
 
 	parms.aborting = arg_is_set(cmd, abort_ARG);
 	parms.background = background;
-	interval_sign = arg_sign_value(cmd, interval_ARG, 0);
+	interval_sign = arg_sign_value(cmd, interval_ARG, SIGN_NONE);
 	if (interval_sign == SIGN_MINUS)
 		log_error("Argument to --interval cannot be negative");
 	parms.interval = arg_uint_value(cmd, interval_ARG,

@@ -35,6 +35,8 @@ static int _sequence_nr = 0;
 struct dm_event_handler {
 	char *dso;
 
+	char *dmeventd_path;
+
 	char *dev_name;
 
 	char *uuid;
@@ -47,10 +49,8 @@ struct dm_event_handler {
 
 static void _dm_event_handler_clear_dev_info(struct dm_event_handler *dmevh)
 {
-	if (dmevh->dev_name)
-		dm_free(dmevh->dev_name);
-	if (dmevh->uuid)
-		dm_free(dmevh->uuid);
+	dm_free(dmevh->dev_name);
+	dm_free(dmevh->uuid);
 	dmevh->dev_name = dmevh->uuid = NULL;
 	dmevh->major = dmevh->minor = 0;
 }
@@ -62,6 +62,7 @@ struct dm_event_handler *dm_event_handler_create(void)
 	if (!(dmevh = dm_malloc(sizeof(*dmevh))))
 		return NULL;
 
+	dmevh->dmeventd_path = NULL;
 	dmevh->dso = dmevh->dev_name = dmevh->uuid = NULL;
 	dmevh->major = dmevh->minor = 0;
 	dmevh->mask = 0;
@@ -73,17 +74,30 @@ struct dm_event_handler *dm_event_handler_create(void)
 void dm_event_handler_destroy(struct dm_event_handler *dmevh)
 {
 	_dm_event_handler_clear_dev_info(dmevh);
-	if (dmevh->dso)
-		dm_free(dmevh->dso);
+	dm_free(dmevh->dso);
+	dm_free(dmevh->dmeventd_path);
 	dm_free(dmevh);
+}
+
+int dm_event_handler_set_dmeventd_path(struct dm_event_handler *dmevh, const char *dmeventd_path)
+{
+	if (!dmeventd_path) /* noop */
+		return 0;
+
+	dm_free(dmevh->dmeventd_path);
+
+	dmevh->dmeventd_path = dm_strdup(dmeventd_path);
+	if (!dmevh->dmeventd_path)
+		return -ENOMEM;
+
+	return 0;
 }
 
 int dm_event_handler_set_dso(struct dm_event_handler *dmevh, const char *path)
 {
 	if (!path) /* noop */
 		return 0;
-	if (dmevh->dso)
-		dm_free(dmevh->dso);
+	dm_free(dmevh->dso);
 
 	dmevh->dso = dm_strdup(path);
 	if (!dmevh->dso)
@@ -216,8 +230,8 @@ static int _daemon_read(struct dm_event_fifos *fifos,
 	fd_set fds;
 	struct timeval tval = { 0, 0 };
 	size_t size = 2 * sizeof(uint32_t);	/* status + size */
-	char *buf = alloca(size);
-	int header = 1;
+	uint32_t *header = alloca(size);
+	char *buf = (char *)header;
 
 	while (bytes < size) {
 		for (i = 0, ret = 0; (i < 20) && (ret < 1); i++) {
@@ -229,6 +243,10 @@ static int _daemon_read(struct dm_event_fifos *fifos,
 				     &tval);
 			if (ret < 0 && errno != EINTR) {
 				log_error("Unable to read from event server");
+				return 0;
+			}
+			if ((ret == 0) && i && !bytes) {
+				log_error("No input from event server.");
 				return 0;
 			}
 		}
@@ -248,9 +266,9 @@ static int _daemon_read(struct dm_event_fifos *fifos,
 		}
 
 		bytes += ret;
-		if (bytes == 2 * sizeof(uint32_t) && header) {
-			msg->cmd = ntohl(*((uint32_t *)buf));
-			msg->size = ntohl(*((uint32_t *)buf + 1));
+		if (header && (bytes == 2 * sizeof(uint32_t))) {
+			msg->cmd = ntohl(header[0]);
+			msg->size = ntohl(header[1]);
 			buf = msg->data = dm_malloc(msg->size);
 			size = msg->size;
 			bytes = 0;
@@ -259,11 +277,9 @@ static int _daemon_read(struct dm_event_fifos *fifos,
 	}
 
 	if (bytes != size) {
-		if (msg->data)
-			dm_free(msg->data);
+		dm_free(msg->data);
 		msg->data = NULL;
 	}
-
 	return bytes == size;
 }
 
@@ -276,12 +292,13 @@ static int _daemon_write(struct dm_event_fifos *fifos,
 	fd_set fds;
 
 	size_t size = 2 * sizeof(uint32_t) + msg->size;
-	char *buf = alloca(size);
+	uint32_t *header = alloca(size);
+	char *buf = (char *)header;
 	char drainbuf[128];
 	struct timeval tval = { 0, 0 };
 
-	*((uint32_t *)buf) = htonl(msg->cmd);
-	*((uint32_t *)buf + 1) = htonl(msg->size);
+	header[0] = htonl(msg->cmd);
+	header[1] = htonl(msg->size);
 	memcpy(buf + 2 * sizeof(uint32_t), msg->data, msg->size);
 
 	/* drain the answer fifo */
@@ -296,7 +313,7 @@ static int _daemon_write(struct dm_event_fifos *fifos,
 		}
 		if (ret == 0)
 			break;
-		read(fifos->server, drainbuf, 127);
+		ret = read(fifos->server, drainbuf, 127);
 	}
 
 	while (bytes < size) {
@@ -311,8 +328,7 @@ static int _daemon_write(struct dm_event_fifos *fifos,
 			}
 		} while (ret < 1);
 
-		ret = write(fifos->client, ((char *) buf) + bytes,
-			    size - bytes);
+		ret = write(fifos->client, buf + bytes, size - bytes);
 		if (ret < 0) {
 			if ((errno == EINTR) || (errno == EAGAIN))
 				continue;
@@ -328,13 +344,13 @@ static int _daemon_write(struct dm_event_fifos *fifos,
 	return bytes == size;
 }
 
-static int _daemon_talk(struct dm_event_fifos *fifos,
-			struct dm_event_daemon_message *msg, int cmd,
-			const char *dso_name, const char *dev_name,
-			enum dm_event_mask evmask, uint32_t timeout)
+int daemon_talk(struct dm_event_fifos *fifos,
+		struct dm_event_daemon_message *msg, int cmd,
+		const char *dso_name, const char *dev_name,
+		enum dm_event_mask evmask, uint32_t timeout)
 {
-	const char *dso = dso_name ? dso_name : "";
-	const char *dev = dev_name ? dev_name : "";
+	const char *dso = dso_name ? dso_name : "-";
+	const char *dev = dev_name ? dev_name : "-";
 	const char *fmt = "%d:%d %s %s %u %" PRIu32;
 	int msg_size;
 	memset(msg, 0, sizeof(*msg));
@@ -366,8 +382,7 @@ static int _daemon_talk(struct dm_event_fifos *fifos,
 
 	do {
 
-		if (msg->data)
-			dm_free(msg->data);
+		dm_free(msg->data);
 		msg->data = 0;
 
 		if (!_daemon_read(fifos, msg)) {
@@ -393,13 +408,13 @@ static int _daemon_talk(struct dm_event_fifos *fifos,
  *
  * Returns: 1 on success, 0 otherwise
  */
-static int _start_daemon(struct dm_event_fifos *fifos)
+static int _start_daemon(char *dmeventd_path, struct dm_event_fifos *fifos)
 {
 	int pid, ret = 0;
 	int status;
 	struct stat statbuf;
-	char dmeventdpath[] = DMEVENTD_PATH; /* const type for execvp */
-	char * const args[] = { dmeventdpath, NULL };
+	char default_dmeventd_path[] = DMEVENTD_PATH;
+	char *args[] = { dmeventd_path ? : default_dmeventd_path, NULL };
 
 	if (stat(fifos->client_path, &statbuf))
 		goto start_server;
@@ -413,15 +428,12 @@ static int _start_daemon(struct dm_event_fifos *fifos)
 	fifos->client = open(fifos->client_path, O_WRONLY | O_NONBLOCK);
 	if (fifos->client >= 0) {
 		/* server is running and listening */
-
-		close(fifos->client);
+		if (close(fifos->client))
+			log_sys_error("close", fifos->client_path);
 		return 1;
 	} else if (errno != ENXIO) {
 		/* problem */
-
-		log_error("%s: Can't open client fifo %s: %s",
-			  __func__, fifos->client_path, strerror(errno));
-		stack;
+		log_sys_error("open", fifos->client_path);
 		return 0;
 	}
 
@@ -429,17 +441,18 @@ static int _start_daemon(struct dm_event_fifos *fifos)
 	/* server is not running */
 
 	if (!strncmp(DMEVENTD_PATH, "/", 1) && stat(DMEVENTD_PATH, &statbuf)) {
-		log_error("Unable to find dmeventd.");
-		return_0;
+		log_sys_error("stat", DMEVENTD_PATH);
+		return 0;
 	}
 
 	pid = fork();
 
 	if (pid < 0)
-		log_error("Unable to fork.");
+		log_sys_error("fork", "");
 
 	else if (!pid) {
 		execvp(args[0], args);
+		log_error("Unable to exec dmeventd: %s", strerror(errno));
 		_exit(EXIT_FAILURE);
 	} else {
 		if (waitpid(pid, &status, 0) < 0)
@@ -454,56 +467,65 @@ static int _start_daemon(struct dm_event_fifos *fifos)
 	return ret;
 }
 
-/* Initialize client. */
-static int _init_client(struct dm_event_fifos *fifos)
+int init_fifos(struct dm_event_fifos *fifos)
 {
 	/* FIXME? Is fifo the most suitable method? Why not share
 	   comms/daemon code with something else e.g. multipath? */
 
-	/* init fifos */
-	memset(fifos, 0, sizeof(*fifos));
+	/* FIXME Make these either configurable or depend directly on dmeventd_path */
 	fifos->client_path = DM_EVENT_FIFO_CLIENT;
 	fifos->server_path = DM_EVENT_FIFO_SERVER;
 
-	if (!_start_daemon(fifos)) {
-		stack;
-		return 0;
-	}
-
 	/* Open the fifo used to read from the daemon. */
 	if ((fifos->server = open(fifos->server_path, O_RDWR)) < 0) {
-		log_error("%s: open server fifo %s",
-			  __func__, fifos->server_path);
-		stack;
+		log_sys_error("open", fifos->server_path);
 		return 0;
 	}
 
 	/* Lock out anyone else trying to do communication with the daemon. */
 	if (flock(fifos->server, LOCK_EX) < 0) {
-		log_error("%s: flock %s", __func__, fifos->server_path);
-		close(fifos->server);
+		log_sys_error("flock", fifos->server_path);
+		if (close(fifos->server))
+			log_sys_error("close", fifos->server_path);
 		return 0;
 	}
 
 /*	if ((fifos->client = open(fifos->client_path, O_WRONLY | O_NONBLOCK)) < 0) {*/
 	if ((fifos->client = open(fifos->client_path, O_RDWR | O_NONBLOCK)) < 0) {
-		log_error("%s: Can't open client fifo %s: %s",
-			  __func__, fifos->client_path, strerror(errno));
-		close(fifos->server);
-		stack;
+		log_sys_error("open", fifos->client_path);
+		if (close(fifos->server))
+			log_sys_error("close", fifos->server_path);
 		return 0;
 	}
 
 	return 1;
 }
 
-static void _dtr_client(struct dm_event_fifos *fifos)
+/* Initialize client. */
+static int _init_client(char *dmeventd_path, struct dm_event_fifos *fifos)
+{
+	/* init fifos */
+	memset(fifos, 0, sizeof(*fifos));
+
+	/* FIXME Make these either configurable or depend directly on dmeventd_path */
+	fifos->client_path = DM_EVENT_FIFO_CLIENT;
+	fifos->server_path = DM_EVENT_FIFO_SERVER;
+
+	if (!_start_daemon(dmeventd_path, fifos))
+		return_0;
+
+	return init_fifos(fifos);
+}
+
+void fini_fifos(struct dm_event_fifos *fifos)
 {
 	if (flock(fifos->server, LOCK_UN))
 		log_error("flock unlock %s", fifos->server_path);
 
-	close(fifos->client);
-	close(fifos->server);
+	if (close(fifos->client))
+		log_sys_error("close", fifos->client_path);
+	if (close(fifos->server))
+		log_sys_error("close", fifos->server_path);
 }
 
 /* Get uuid of a device */
@@ -517,62 +539,73 @@ static struct dm_task *_get_device_info(const struct dm_event_handler *dmevh)
 		return NULL;
 	}
 
-	if (dmevh->uuid)
-		dm_task_set_uuid(dmt, dmevh->uuid);
-	else if (dmevh->dev_name)
-		dm_task_set_name(dmt, dmevh->dev_name);
-	else if (dmevh->major && dmevh->minor) {
-		dm_task_set_major(dmt, dmevh->major);
-		dm_task_set_minor(dmt, dmevh->minor);
-        }
+	if (dmevh->uuid) {
+		if (!dm_task_set_uuid(dmt, dmevh->uuid))
+			goto_bad;
+	} else if (dmevh->dev_name) {
+		if (!dm_task_set_name(dmt, dmevh->dev_name))
+			goto_bad;
+	} else if (dmevh->major && dmevh->minor) {
+		if (!dm_task_set_major(dmt, dmevh->major) ||
+		    !dm_task_set_minor(dmt, dmevh->minor))
+			goto_bad;
+	}
 
 	/* FIXME Add name or uuid or devno to messages */
 	if (!dm_task_run(dmt)) {
 		log_error("_get_device_info: dm_task_run() failed");
-		goto failed;
+		goto bad;
 	}
 
 	if (!dm_task_get_info(dmt, &info)) {
 		log_error("_get_device_info: failed to get info for device");
-		goto failed;
+		goto bad;
 	}
 
 	if (!info.exists) {
-		log_error("_get_device_info: device not found");
-		goto failed;
+		log_error("_get_device_info: %s%s%s%.0d%s%.0d%s%s: device not found",
+			  dmevh->uuid ? : "", 
+			  (!dmevh->uuid && dmevh->dev_name) ? dmevh->dev_name : "", 
+			  (!dmevh->uuid && !dmevh->dev_name && dmevh->major > 0) ? "(" : "",
+			  (!dmevh->uuid && !dmevh->dev_name && dmevh->major > 0) ? dmevh->major : 0,
+			  (!dmevh->uuid && !dmevh->dev_name && dmevh->major > 0) ? ":" : "",
+			  (!dmevh->uuid && !dmevh->dev_name && dmevh->minor > 0) ? dmevh->minor : 0,
+			  (!dmevh->uuid && !dmevh->dev_name && dmevh->major > 0) && dmevh->minor == 0 ? "0" : "",
+			  (!dmevh->uuid && !dmevh->dev_name && dmevh->major > 0) ? ") " : "");
+		goto bad;
 	}
 
+		  
 	return dmt;
 
-failed:
+      bad:
 	dm_task_destroy(dmt);
 	return NULL;
 }
 
 /* Handle the event (de)registration call and return negative error codes. */
-static int _do_event(int cmd, struct dm_event_daemon_message *msg,
+static int _do_event(int cmd, char *dmeventd_path, struct dm_event_daemon_message *msg,
 		     const char *dso_name, const char *dev_name,
 		     enum dm_event_mask evmask, uint32_t timeout)
 {
 	int ret;
 	struct dm_event_fifos fifos;
 
-	if (!_init_client(&fifos)) {
+	if (!_init_client(dmeventd_path, &fifos)) {
 		stack;
 		return -ESRCH;
 	}
 
-	ret = _daemon_talk(&fifos, msg, DM_EVENT_CMD_HELLO, 0, 0, 0, 0);
+	ret = daemon_talk(&fifos, msg, DM_EVENT_CMD_HELLO, NULL, NULL, 0, 0);
 
-	if (msg->data)
-		dm_free(msg->data);
+	dm_free(msg->data);
 	msg->data = 0;
 
 	if (!ret)
-		ret = _daemon_talk(&fifos, msg, cmd, dso_name, dev_name, evmask, timeout);
+		ret = daemon_talk(&fifos, msg, cmd, dso_name, dev_name, evmask, timeout);
 
 	/* what is the opposite of init? */
-	_dtr_client(&fifos);
+	fini_fifos(&fifos);
 
 	return ret;
 }
@@ -592,7 +625,7 @@ int dm_event_register_handler(const struct dm_event_handler *dmevh)
 
 	uuid = dm_task_get_uuid(dmt);
 
-	if ((err = _do_event(DM_EVENT_CMD_REGISTER_FOR_EVENT, &msg,
+	if ((err = _do_event(DM_EVENT_CMD_REGISTER_FOR_EVENT, dmevh->dmeventd_path, &msg,
 			     dmevh->dso, uuid, dmevh->mask, dmevh->timeout)) < 0) {
 		log_error("%s: event registration failed: %s",
 			  dm_task_get_name(dmt),
@@ -600,8 +633,7 @@ int dm_event_register_handler(const struct dm_event_handler *dmevh)
 		ret = 0;
 	}
 
-	if (msg.data)
-		dm_free(msg.data);
+	dm_free(msg.data);
 
 	dm_task_destroy(dmt);
 
@@ -622,7 +654,7 @@ int dm_event_unregister_handler(const struct dm_event_handler *dmevh)
 
 	uuid = dm_task_get_uuid(dmt);
 
-	if ((err = _do_event(DM_EVENT_CMD_UNREGISTER_FOR_EVENT, &msg,
+	if ((err = _do_event(DM_EVENT_CMD_UNREGISTER_FOR_EVENT, dmevh->dmeventd_path, &msg,
 			    dmevh->dso, uuid, dmevh->mask, dmevh->timeout)) < 0) {
 		log_error("%s: event deregistration failed: %s",
 			  dm_task_get_name(dmt),
@@ -630,8 +662,7 @@ int dm_event_unregister_handler(const struct dm_event_handler *dmevh)
 		ret = 0;
 	}
 
-	if (msg.data)
-		dm_free(msg.data);
+	dm_free(msg.data);
 
 	dm_task_destroy(dmt);
 
@@ -697,26 +728,29 @@ int dm_event_get_registered_device(struct dm_event_handler *dmevh, int next)
 
 	uuid = dm_task_get_uuid(dmt);
 
-	if (!(ret = _do_event(next ? DM_EVENT_CMD_GET_NEXT_REGISTERED_DEVICE :
-			     DM_EVENT_CMD_GET_REGISTERED_DEVICE,
-			      &msg, dmevh->dso, uuid, dmevh->mask, 0))) {
-		/* FIXME this will probably horribly break if we get
-		   ill-formatted reply */
-		ret = _parse_message(&msg, &reply_dso, &reply_uuid, &reply_mask);
-	} else {
+	if (_do_event(next ? DM_EVENT_CMD_GET_NEXT_REGISTERED_DEVICE :
+		      DM_EVENT_CMD_GET_REGISTERED_DEVICE, dmevh->dmeventd_path,
+		      &msg, dmevh->dso, uuid, dmevh->mask, 0)) {
+		log_debug("%s: device not registered.", dm_task_get_name(dmt));
 		ret = -ENOENT;
 		goto fail;
 	}
 
+	/* FIXME this will probably horribly break if we get
+	   ill-formatted reply */
+	ret = _parse_message(&msg, &reply_dso, &reply_uuid, &reply_mask);
+
 	dm_task_destroy(dmt);
 	dmt = NULL;
 
-	if (msg.data) {
-		dm_free(msg.data);
-		msg.data = NULL;
-	}
+	dm_free(msg.data);
+	msg.data = NULL;
 
 	_dm_event_handler_clear_dev_info(dmevh);
+	if (!reply_uuid) {
+		ret = -ENXIO; /* dmeventd probably gave us bogus uuid back */
+		goto fail;
+	}
 	dmevh->uuid = dm_strdup(reply_uuid);
 	if (!dmevh->uuid) {
 		ret = -ENOMEM;
@@ -731,15 +765,11 @@ int dm_event_get_registered_device(struct dm_event_handler *dmevh, int next)
 	dm_event_handler_set_dso(dmevh, reply_dso);
 	dm_event_handler_set_event_mask(dmevh, reply_mask);
 
-	if (reply_dso) {
-		dm_free(reply_dso);
-		reply_dso = NULL;
-	}
+	dm_free(reply_dso);
+	reply_dso = NULL;
 
-	if (reply_uuid) {
-		dm_free(reply_uuid);
-		reply_uuid = NULL;
-	}
+	dm_free(reply_uuid);
+	reply_uuid = NULL;
 
 	dmevh->dev_name = dm_strdup(dm_task_get_name(dmt));
 	if (!dmevh->dev_name) {
@@ -760,16 +790,43 @@ int dm_event_get_registered_device(struct dm_event_handler *dmevh, int next)
 	return ret;
 
  fail:
-	if (msg.data)
-		dm_free(msg.data);
-	if (reply_dso)
-		dm_free(reply_dso);
-	if (reply_uuid)
-		dm_free(reply_uuid);
+	dm_free(msg.data);
+	dm_free(reply_dso);
+	dm_free(reply_uuid);
 	_dm_event_handler_clear_dev_info(dmevh);
 	if (dmt)
 		dm_task_destroy(dmt);
 	return ret;
+}
+
+/*
+ * You can (and have to) call this at the stage of the protocol where
+ *     daemon_talk(fifos, &msg, DM_EVENT_CMD_HELLO, NULL, NULL, 0, 0)
+ *
+ * would be normally sent. This call will parse the version reply from
+ * dmeventd, in addition to above call. It is not safe to call this at any
+ * other place in the protocol.
+ *
+ * This is an internal function, not exposed in the public API.
+ */
+
+int dm_event_get_version(struct dm_event_fifos *fifos, int *version) {
+	char *p;
+	struct dm_event_daemon_message msg = { 0, 0, NULL };
+
+	if (daemon_talk(fifos, &msg, DM_EVENT_CMD_HELLO, NULL, NULL, 0, 0))
+		return 0;
+	p = msg.data;
+	*version = 0;
+
+	p = strchr(p, ' '); /* Message ID */
+        if (!p) return 0;
+	p = strchr(p + 1, ' '); /* HELLO */
+        if (!p) return 0;
+	p = strchr(p + 1, ' '); /* HELLO, once more */
+	if (p)
+		*version = atoi(p);
+	return 1;
 }
 
 #if 0				/* left out for now */

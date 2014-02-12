@@ -4,6 +4,8 @@ vgextend \- add physical volumes to a volume group
 .SH SYNOPSIS
 .B vgextend
 [\-A|\-\-autobackup y|n] [\-d|\-\-debug] [\-h|\-?|\-\-help] 
+[\-\-restoremissing]
+[\-f|\-\-force]
 [\-t|\-\-test]
 [\-v|\-\-verbose]
 [ \fIPHYSICAL DEVICE OPTIONS\fP ]
@@ -11,7 +13,10 @@ VolumeGroupName PhysicalDevicePath [PhysicalDevicePath...]
 .SH DESCRIPTION
 vgextend allows you to add one or more initialized physical volumes ( see
 .B pvcreate(8)
-) to an existing volume group to extend it in size.
+) to an existing volume group to extend it in size. Moreover, it allows you to
+re-add a physical volume that has gone missing previously, due to a transient
+device failure, without re-initialising it. Use vgextend \-\-restoremissing to
+that effect.
 .sp
 If \fIPhysicalDevicePath\fP was not previously configured for LVM with
 \fBpvcreate (8)\fP, the device will be initialized with the same
@@ -37,6 +42,8 @@ volume group.  These options are further described in the pvcreate man page.
 .BR \-\-labelsector " sector"
 .TP
 .BR \-\-metadatasize " size"
+.TP
+.RB [ \-\-metadataignore y|n ]
 .TP
 .BR \-\-pvmetadatacopies " copies"
 .TP

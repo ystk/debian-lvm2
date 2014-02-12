@@ -1,6 +1,6 @@
 #
 # Copyright (C) 2001-2004 Sistina Software, Inc. All rights reserved.
-# Copyright (C) 2004-2010 Red Hat, Inc. All rights reserved.
+# Copyright (C) 2004-2011 Red Hat, Inc. All rights reserved.
 #
 # This file is part of LVM2.
 #
@@ -32,6 +32,18 @@ ifeq ("@MIRRORS@", "shared")
   SUBDIRS += mirror
 endif
 
+ifeq ("@RAID@", "shared")
+  SUBDIRS += raid
+endif
+
+ifeq ("@REPLICATORS@", "shared")
+  SUBDIRS += replicator
+endif
+
+ifeq ("@THIN@", "shared")
+  SUBDIRS += thin
+endif
+
 SOURCES =\
 	activate/activate.c \
 	cache/lvmcache.c \
@@ -43,6 +55,7 @@ SOURCES =\
 	device/dev-io.c \
 	device/dev-md.c \
 	device/dev-swap.c \
+	device/dev-luks.c \
 	device/device.c \
 	display/display.c \
 	error/errseg.c \
@@ -52,6 +65,7 @@ SOURCES =\
 	filters/filter-regex.c \
 	filters/filter-sysfs.c \
 	filters/filter-md.c \
+	filters/filter-mpath.c \
 	filters/filter.c \
 	format_text/archive.c \
 	format_text/archiver.c \
@@ -68,22 +82,30 @@ SOURCES =\
 	locking/locking.c \
 	locking/no_locking.c \
 	log/log.c \
+	metadata/lv.c \
 	metadata/lv_manip.c \
 	metadata/merge.c \
 	metadata/metadata.c \
 	metadata/mirror.c \
+	metadata/pv.c \
 	metadata/pv_manip.c \
 	metadata/pv_map.c \
+	metadata/raid_manip.c \
+	metadata/replicator_manip.c \
 	metadata/segtype.c \
 	metadata/snapshot_manip.c \
+	metadata/thin_manip.c \
+	metadata/vg.c \
 	misc/crc.c \
 	misc/lvm-exec.c \
 	misc/lvm-file.c \
 	misc/lvm-globals.c \
 	misc/lvm-string.c \
 	misc/lvm-wrappers.c \
+	misc/lvm-percent.c \
 	misc/util.c \
 	mm/memlock.c \
+	report/properties.c \
 	report/report.c \
 	striped/striped.c \
 	uuid/uuid.c \
@@ -129,6 +151,18 @@ ifeq ("@MIRRORS@", "internal")
   SOURCES += mirror/mirrored.c
 endif
 
+ifeq ("@RAID@", "internal")
+  SOURCES += raid/raid.c
+endif
+
+ifeq ("@REPLICATORS@", "internal")
+  SOURCES += replicator/replicator.c
+endif
+
+ifeq ("@THIN@", "internal")
+  SOURCES += thin/thin.c
+endif
+
 ifeq ("@DEVMAPPER@", "yes")
   SOURCES +=\
 	activate/dev_manager.c \
@@ -139,6 +173,11 @@ ifeq ("@HAVE_LIBDL@", "yes")
   SOURCES +=\
 	locking/external_locking.c \
 	misc/sharedlib.c
+endif
+
+ifeq ("@BUILD_LVMETAD@", "yes")
+  SOURCES +=\
+	cache/lvmetad.c
 endif
 
 ifeq ("@DMEVENTD@", "yes")
@@ -155,6 +194,9 @@ ifeq ($(MAKECMDGOALS),distclean)
 	format_pool \
 	snapshot \
 	mirror \
+	raid \
+	replicator \
+	thin \
 	locking
 endif
 

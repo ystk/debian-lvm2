@@ -27,6 +27,7 @@
 #include <sys/utsname.h>
 
 struct formatter;
+__attribute__((format(printf, 3, 0)))
 typedef int (*out_with_comment_fn) (struct formatter * f, const char *comment,
 				    const char *fmt, va_list ap);
 typedef int (*nl_fn) (struct formatter * f);
@@ -147,6 +148,7 @@ static int _nl_raw(struct formatter *f)
 }
 
 #define COMMENT_TAB 6
+__attribute__((format(printf, 3, 0)))
 static int _out_with_comment_file(struct formatter *f, const char *comment,
 				  const char *fmt, va_list ap)
 {
@@ -182,8 +184,9 @@ static int _out_with_comment_file(struct formatter *f, const char *comment,
 	return 1;
 }
 
+__attribute__((format(printf, 3, 0)))
 static int _out_with_comment_raw(struct formatter *f,
-				 const char *comment __attribute((unused)),
+				 const char *comment __attribute__((unused)),
 				 const char *fmt, va_list ap)
 {
 	int n;
@@ -316,9 +319,9 @@ static int _out_line(const char *line, void *_f) {
 	return out_text(f, "%s", line);
 }
 
-int out_config_node(struct formatter *f, const struct config_node *cn)
+int out_config_node(struct formatter *f, const struct dm_config_node *cn)
 {
-	return write_config_node(cn, _out_line, f);
+	return dm_config_write_node(cn, _out_line, f);
 }
 
 static int _print_header(struct formatter *f,
@@ -334,12 +337,12 @@ static int _print_header(struct formatter *f,
 	outf(f, FORMAT_VERSION_FIELD " = %d", FORMAT_VERSION_VALUE);
 	outnl(f);
 
-	if (!(buf = alloca(escaped_len(desc)))) {
+	if (!(buf = alloca(dm_escaped_len(desc)))) {
 		log_error("temporary stack allocation for description"
 			  "string failed");
 		return 0;
 	}
-	outf(f, "description = \"%s\"", escape_double_quotes(buf, desc));
+	outf(f, "description = \"%s\"", dm_escape_double_quotes(buf, desc));
 	outnl(f);
 	outf(f, "creation_host = \"%s\"\t# %s %s %s %s %s", _utsname.nodename,
 	     _utsname.sysname, _utsname.nodename, _utsname.release,
@@ -363,6 +366,24 @@ static int _print_flag_config(struct formatter *f, uint64_t status, int type)
 	return 1;
 }
 
+
+static int _out_tags(struct formatter *f, struct dm_list *tags)
+{
+	char *tag_buffer;
+
+	if (!dm_list_empty(tags)) {
+		if (!(tag_buffer = alloc_printed_tags(tags)))
+			return_0;
+		if (!out_text(f, "tags = %s", tag_buffer)) {
+			dm_free(tag_buffer);
+			return_0;
+		}
+		dm_free(tag_buffer);
+	}
+
+	return 1;
+}
+
 static int _print_vg(struct formatter *f, struct volume_group *vg)
 {
 	char buffer[4096];
@@ -374,14 +395,14 @@ static int _print_vg(struct formatter *f, struct volume_group *vg)
 
 	outf(f, "seqno = %u", vg->seqno);
 
+	if (vg->fid && vg->fid->fmt)
+		outf(f, "format = \"%s\" # informational", vg->fid->fmt->name);
+
 	if (!_print_flag_config(f, vg->status, VG_FLAGS))
 		return_0;
 
-	if (!dm_list_empty(&vg->tags)) {
-		if (!print_tags(&vg->tags, buffer, sizeof(buffer)))
-			return_0;
-		outf(f, "tags = %s", buffer);
-	}
+	if (!_out_tags(f, &vg->tags))
+		return_0;
 
 	if (vg->system_id && *vg->system_id)
 		outf(f, "system_id = \"%s\"", vg->system_id);
@@ -397,6 +418,7 @@ static int _print_vg(struct formatter *f, struct volume_group *vg)
 		outf(f, "allocation_policy = \"%s\"",
 		     get_alloc_string(vg->alloc));
 	}
+	outf(f, "metadata_copies = %u", vg->mda_copies);
 
 	return 1;
 }
@@ -412,7 +434,7 @@ static const char *_get_pv_name_from_uuid(struct formatter *f, char *uuid)
 
 static const char *_get_pv_name(struct formatter *f, struct physical_volume *pv)
 {
-	char uuid[64] __attribute((aligned(8)));
+	char uuid[64] __attribute__((aligned(8)));
 
 	if (!pv || !id_write_format(&pv->id, uuid, sizeof(uuid)))
 		return_NULL;
@@ -446,24 +468,21 @@ static int _print_pvs(struct formatter *f, struct volume_group *vg)
 
 		outf(f, "id = \"%s\"", buffer);
 
-		if (!(buf = alloca(escaped_len(pv_dev_name(pv))))) {
+		if (!(buf = alloca(dm_escaped_len(pv_dev_name(pv))))) {
 			log_error("temporary stack allocation for device name"
 				  "string failed");
 			return 0;
 		}
 
 		outhint(f, "device = \"%s\"",
-			escape_double_quotes(buf, pv_dev_name(pv)));
+			dm_escape_double_quotes(buf, pv_dev_name(pv)));
 		outnl(f);
 
 		if (!_print_flag_config(f, pv->status, PV_FLAGS))
 			return_0;
 
-		if (!dm_list_empty(&pv->tags)) {
-			if (!print_tags(&pv->tags, buffer, sizeof(buffer)))
-				return_0;
-			outf(f, "tags = %s", buffer);
-		}
+		if (!_out_tags(f, &pv->tags))
+			return_0;
 
 		outsize(f, pv->size, "dev_size = %" PRIu64, pv->size);
 
@@ -483,8 +502,6 @@ static int _print_pvs(struct formatter *f, struct volume_group *vg)
 static int _print_segment(struct formatter *f, struct volume_group *vg,
 			  int count, struct lv_segment *seg)
 {
-	char buffer[4096];
-
 	outf(f, "segment%u {", count);
 	_inc_indent(f);
 
@@ -495,11 +512,8 @@ static int _print_segment(struct formatter *f, struct volume_group *vg,
 	outnl(f);
 	outf(f, "type = \"%s\"", seg->segtype->name);
 
-	if (!dm_list_empty(&seg->tags)) {
-		if (!print_tags(&seg->tags, buffer, sizeof(buffer)))
-			return_0;
-		outf(f, "tags = %s", buffer);
-	}
+	if (!_out_tags(f, &seg->tags))
+		return_0;
 
 	if (seg->segtype->ops->text_export &&
 	    !seg->segtype->ops->text_export(seg, f))
@@ -533,10 +547,25 @@ int out_areas(struct formatter *f, const struct lv_segment *seg,
 			     (s == seg->area_count - 1) ? "" : ",");
 			break;
 		case AREA_LV:
-			outf(f, "\"%s\", %u%s",
-			     seg_lv(seg, s)->name,
-			     seg_le(seg, s),
+			if (!(seg->status & RAID)) {
+				outf(f, "\"%s\", %u%s",
+				     seg_lv(seg, s)->name,
+				     seg_le(seg, s),
+				     (s == seg->area_count - 1) ? "" : ",");
+				continue;
+			}
+
+			/* RAID devices are laid-out in metadata/data pairs */
+			if (!(seg_lv(seg, s)->status & RAID_IMAGE) ||
+			    !(seg_metalv(seg, s)->status & RAID_META)) {
+				log_error("RAID segment has non-RAID areas");
+				return 0;
+			}
+
+			outf(f, "\"%s\", \"%s\"%s",
+			     seg_metalv(seg, s)->name, seg_lv(seg, s)->name,
 			     (s == seg->area_count - 1) ? "" : ",");
+
 			break;
 		case AREA_UNASSIGNED:
 			return 0;
@@ -553,6 +582,8 @@ static int _print_lv(struct formatter *f, struct logical_volume *lv)
 	struct lv_segment *seg;
 	char buffer[4096];
 	int seg_count;
+	struct tm *local_tm;
+	time_t ts;
 
 	outnl(f);
 	outf(f, "%s {", lv->name);
@@ -567,10 +598,20 @@ static int _print_lv(struct formatter *f, struct logical_volume *lv)
 	if (!_print_flag_config(f, lv->status, LV_FLAGS))
 		return_0;
 
-	if (!dm_list_empty(&lv->tags)) {
-		if (!print_tags(&lv->tags, buffer, sizeof(buffer)))
-			return_0;
-		outf(f, "tags = %s", buffer);
+	if (!_out_tags(f, &lv->tags))
+		return_0;
+
+	if (lv->timestamp) {
+		ts = (time_t)lv->timestamp;
+		strncpy(buffer, "# ", sizeof(buffer));
+		if (!(local_tm = localtime(&ts)) ||
+		    !strftime(buffer + 2, sizeof(buffer) - 2,
+			      "%Y-%m-%d %T %z", local_tm))
+			buffer[0] = 0;
+
+		outf(f, "creation_host = \"%s\"", lv->hostname);
+		outfc(f, buffer, "creation_time = %" PRIu64,
+		      lv->timestamp);
 	}
 
 	if (lv->alloc != ALLOC_INHERIT)
@@ -719,11 +760,15 @@ static int _text_vg_export(struct formatter *f,
 	r = 1;
 
       out:
-	if (f->mem)
+	if (f->mem) {
 		dm_pool_destroy(f->mem);
+		f->mem = NULL;
+	}
 
-	if (f->pv_names)
+	if (f->pv_names) {
 		dm_hash_destroy(f->pv_names);
+		f->pv_names = NULL;
+	}
 
 	return r;
 }
@@ -735,10 +780,9 @@ int text_vg_export_file(struct volume_group *vg, const char *desc, FILE *fp)
 
 	_init();
 
-	if (!(f = dm_malloc(sizeof(*f))))
+	if (!(f = dm_zalloc(sizeof(*f))))
 		return_0;
 
-	memset(f, 0, sizeof(*f));
 	f->data.fp = fp;
 	f->indent = 0;
 	f->header = 1;
@@ -753,17 +797,15 @@ int text_vg_export_file(struct volume_group *vg, const char *desc, FILE *fp)
 }
 
 /* Returns amount of buffer used incl. terminating NUL */
-int text_vg_export_raw(struct volume_group *vg, const char *desc, char **buf)
+size_t text_vg_export_raw(struct volume_group *vg, const char *desc, char **buf)
 {
 	struct formatter *f;
-	int r = 0;
+	size_t r = 0;
 
 	_init();
 
-	if (!(f = dm_malloc(sizeof(*f))))
+	if (!(f = dm_zalloc(sizeof(*f))))
 		return_0;
-
-	memset(f, 0, sizeof(*f));
 
 	f->data.buf.size = 65536;	/* Initial metadata limit */
 	if (!(f->data.buf.start = dm_malloc(f->data.buf.size))) {
@@ -789,7 +831,7 @@ int text_vg_export_raw(struct volume_group *vg, const char *desc, char **buf)
 	return r;
 }
 
-int export_vg_to_buffer(struct volume_group *vg, char **buf)
+size_t export_vg_to_buffer(struct volume_group *vg, char **buf)
 {
 	return text_vg_export_raw(vg, "", buf);
 }

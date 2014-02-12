@@ -38,17 +38,19 @@ static int _no_lock_resource(struct cmd_context *cmd, const char *resource,
 {
 	switch (flags & LCK_SCOPE_MASK) {
 	case LCK_VG:
+		if (!strcmp(resource, VG_SYNC_NAMES))
+			fs_unlock();
 		break;
 	case LCK_LV:
 		switch (flags & LCK_TYPE_MASK) {
 		case LCK_NULL:
 			return lv_deactivate(cmd, resource);
 		case LCK_UNLOCK:
-			return lv_resume_if_active(cmd, resource);
+			return lv_resume_if_active(cmd, resource, (flags & LCK_ORIGIN_ONLY) ? 1: 0, 0, (flags & LCK_REVERT) ? 1 : 0);
 		case LCK_READ:
 			return lv_activate_with_filter(cmd, resource, 0);
 		case LCK_WRITE:
-			return lv_suspend_if_active(cmd, resource);
+			return lv_suspend_if_active(cmd, resource, (flags & LCK_ORIGIN_ONLY) ? 1 : 0, 0);
 		case LCK_EXCL:
 			return lv_activate_with_filter(cmd, resource, 1);
 		default:
@@ -79,7 +81,8 @@ static int _readonly_lock_resource(struct cmd_context *cmd,
 	return _no_lock_resource(cmd, resource, flags);
 }
 
-int init_no_locking(struct locking_type *locking, struct cmd_context *cmd __attribute((unused)))
+int init_no_locking(struct locking_type *locking, struct cmd_context *cmd __attribute__((unused)),
+		    int suppress_messages)
 {
 	locking->lock_resource = _no_lock_resource;
 	locking->reset_locking = _no_reset_locking;
@@ -89,7 +92,8 @@ int init_no_locking(struct locking_type *locking, struct cmd_context *cmd __attr
 	return 1;
 }
 
-int init_readonly_locking(struct locking_type *locking, struct cmd_context *cmd __attribute((unused)))
+int init_readonly_locking(struct locking_type *locking, struct cmd_context *cmd __attribute__((unused)),
+			  int suppress_messages)
 {
 	locking->lock_resource = _readonly_lock_resource;
 	locking->reset_locking = _no_reset_locking;

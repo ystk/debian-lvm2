@@ -33,24 +33,23 @@ will not be changed (nor will their associated PVs).
 The LVM2 binary to use.
 Defaults to "lvm".
 .SH EXAMPLES
-If origin VG
-.B test_vg 
-has PVs 
-.BR /dev/loop0 " and " /dev/loop1
-and 
-.BR /dev/loop2 " and " /dev/loop3
-are respective snapshot PVs of the origin PVs.
+The origin VG
+.B vg00
+has origin PVs
+.BR /dev/sda " and " /dev/sdb
+and the respective snapshot PVs are
+.BR /dev/sdc " and " /dev/sdd "."
 To rename the VG
 associated with
-.BR /dev/loop2 " and " /dev/loop3
+.BR /dev/sdc " and " /dev/sdd
 from
-.B test_vg
+.B vg00
 to
-.B test_vg_snap
-(and change associated VG and PV UUIDs):
+.B vg00_snap
+(and to change associated VG and PV UUIDs) do:
 .nf
 
-\	vgimportclone --basevgname test_vg_snap /dev/loop2 /dev/loop3
+\	vgimportclone --basevgname vg00_snap /dev/sdc /dev/sdd
 
 .fi
 .SH SEE ALSO

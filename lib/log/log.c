@@ -43,6 +43,9 @@ static lvm2_log_fn_t _lvm2_log_fn = NULL;
 static int _lvm_errno = 0;
 static int _store_errmsg = 0;
 static char *_lvm_errmsg = NULL;
+static size_t _lvm_errmsg_size = 0;
+static size_t _lvm_errmsg_len = 0;
+#define MAX_ERRMSG_LEN (512 * 1024)  /* Max size of error buffer 512KB */
 
 void init_log_fn(lvm2_log_fn_t log_fn)
 {
@@ -107,7 +110,7 @@ void release_log_memory(void)
 void fin_log(void)
 {
 	if (_log_direct) {
-		dev_close(&_log_dev);
+		(void) dev_close(&_log_dev);
 		_log_direct = 0;
 	}
 
@@ -124,7 +127,7 @@ void fin_log(void)
 	}
 }
 
-void fin_syslog()
+void fin_syslog(void)
 {
 	if (_syslog)
 		closelog();
@@ -133,7 +136,7 @@ void fin_syslog()
 
 void init_msg_prefix(const char *prefix)
 {
-	strncpy(_msg_prefix, prefix, sizeof(_msg_prefix));
+	strncpy(_msg_prefix, prefix, sizeof(_msg_prefix) - 1);
 	_msg_prefix[sizeof(_msg_prefix) - 1] = '\0';
 }
 
@@ -154,6 +157,7 @@ void reset_lvm_errno(int store_errmsg)
 	if (_lvm_errmsg) {
 		dm_free(_lvm_errmsg);
 		_lvm_errmsg = NULL;
+		_lvm_errmsg_size = _lvm_errmsg_len = 0;
 	}
 
 	_store_errmsg = store_errmsg;
@@ -181,7 +185,7 @@ void print_log(int level, const char *file, int line, int dm_errno,
 	       const char *format, ...)
 {
 	va_list ap;
-	char buf[1024], buf2[4096], locn[4096];
+	char buf[1024], locn[4096];
 	int bufused, n;
 	const char *message;
 	const char *trformat;		/* Translated format string */
@@ -189,6 +193,7 @@ void print_log(int level, const char *file, int line, int dm_errno,
 	int use_stderr = level & _LOG_STDERR;
 	int log_once = level & _LOG_ONCE;
 	int fatal_internal_error = 0;
+	size_t msglen;
 
 	level &= ~(_LOG_STDERR|_LOG_ONCE);
 
@@ -216,7 +221,7 @@ void print_log(int level, const char *file, int line, int dm_errno,
 	    (_store_errmsg && (level <= _LOG_ERR)) ||
 	    log_once) {
 		va_start(ap, format);
-		n = vsnprintf(buf2, sizeof(buf2) - 1, trformat, ap);
+		n = vsnprintf(locn, sizeof(locn) - 1, trformat, ap);
 		va_end(ap);
 
 		if (n < 0) {
@@ -225,18 +230,29 @@ void print_log(int level, const char *file, int line, int dm_errno,
 			goto log_it;
 		}
 
-		buf2[sizeof(buf2) - 1] = '\0';
-		message = &buf2[0];
+		locn[sizeof(locn) - 1] = '\0';
+		message = &locn[0];
 	}
 
-	if (_store_errmsg && (level <= _LOG_ERR)) {
-		if (!_lvm_errmsg)
-			_lvm_errmsg = dm_strdup(message);
-		else if ((newbuf = dm_realloc(_lvm_errmsg,
- 					      strlen(_lvm_errmsg) +
-					      strlen(message) + 2))) {
-			_lvm_errmsg = strcat(newbuf, "\n");
-			_lvm_errmsg = strcat(newbuf, message);
+/* FIXME Avoid pointless use of message buffer when it'll never be read! */
+	if (_store_errmsg && (level <= _LOG_ERR) &&
+	    _lvm_errmsg_len < MAX_ERRMSG_LEN) {
+		msglen = strlen(message);
+		if ((_lvm_errmsg_len + msglen + 1) >= _lvm_errmsg_size) {
+			_lvm_errmsg_size = 2 * (_lvm_errmsg_len + msglen + 1);
+			if ((newbuf = dm_realloc(_lvm_errmsg,
+						 _lvm_errmsg_size)))
+				_lvm_errmsg = newbuf;
+			else
+				_lvm_errmsg_size = _lvm_errmsg_len;
+		}
+		if (_lvm_errmsg &&
+		    (_lvm_errmsg_len + msglen + 2) < _lvm_errmsg_size) {
+			/* prepend '\n' and copy with '\0' but do not count in */
+                        if (_lvm_errmsg_len)
+				_lvm_errmsg[_lvm_errmsg_len++] = '\n';
+			memcpy(_lvm_errmsg + _lvm_errmsg_len, message, msglen + 1);
+			_lvm_errmsg_len += msglen;
 		}
 	}
 
@@ -246,7 +262,7 @@ void print_log(int level, const char *file, int line, int dm_errno,
 		if (_duplicated) {
 			if (dm_hash_lookup(_duplicated, message))
 				level = _LOG_NOTICE;
-			dm_hash_insert(_duplicated, message, (void*)1);
+			(void) dm_hash_insert(_duplicated, message, (void*)1);
 		}
 	}
 
@@ -260,8 +276,8 @@ void print_log(int level, const char *file, int line, int dm_errno,
       log_it:
 	if (!_log_suppress) {
 		if (verbose_level() > _LOG_DEBUG)
-			dm_snprintf(locn, sizeof(locn), "#%s:%d ",
-				     file, line);
+			(void) dm_snprintf(locn, sizeof(locn), "#%s:%d ",
+					   file, line);
 		else
 			locn[0] = '\0';
 
@@ -336,7 +352,7 @@ void print_log(int level, const char *file, int line, int dm_errno,
 	if (level > debug_level())
 		return;
 
-	if (_log_to_file && (_log_while_suspended || !memlock())) {
+	if (_log_to_file && (_log_while_suspended || !critical_section())) {
 		fprintf(_log_file, "%s:%d %s%s", file, line, log_command_name(),
 			_msg_prefix);
 
@@ -348,18 +364,18 @@ void print_log(int level, const char *file, int line, int dm_errno,
 		fflush(_log_file);
 	}
 
-	if (_syslog && (_log_while_suspended || !memlock())) {
+	if (_syslog && (_log_while_suspended || !critical_section())) {
 		va_start(ap, format);
 		vsyslog(level, trformat, ap);
 		va_end(ap);
 	}
 
 	/* FIXME This code is unfinished - pre-extend & condense. */
-	if (!_already_logging && _log_direct && memlock()) {
+	if (!_already_logging && _log_direct && critical_section()) {
 		_already_logging = 1;
 		memset(&buf, ' ', sizeof(buf));
 		bufused = 0;
-		if ((n = dm_snprintf(buf, sizeof(buf) - bufused - 1,
+		if ((n = dm_snprintf(buf, sizeof(buf) - 1,
 				      "%s:%d %s%s", file, line, log_command_name(),
 				      _msg_prefix)) == -1)
 			goto done;
@@ -372,8 +388,8 @@ void print_log(int level, const char *file, int line, int dm_errno,
 		va_end(ap);
 		bufused += n;
 
-	      done:
 		buf[bufused - 1] = '\n';
+	      done:
 		buf[bufused] = '\n';
 		buf[sizeof(buf) - 1] = '\n';
 		/* FIXME real size bufused */

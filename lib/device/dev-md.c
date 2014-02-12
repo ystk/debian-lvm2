@@ -27,6 +27,7 @@
 #define MD_RESERVED_SECTORS (MD_RESERVED_BYTES / 512)
 #define MD_NEW_SIZE_SECTORS(x) ((x & ~(MD_RESERVED_SECTORS - 1)) \
 				- MD_RESERVED_SECTORS)
+#define MD_MAX_SYSFS_SIZE 64
 
 static int _dev_has_md_magic(struct device *dev, uint64_t sb_offset)
 {
@@ -94,7 +95,7 @@ int dev_is_md(struct device *dev, uint64_t *sb)
 	if (size < MD_RESERVED_SECTORS * 2)
 		return 0;
 
-	if (!dev_open(dev)) {
+	if (!dev_open_readonly(dev)) {
 		stack;
 		return -1;
 	}
@@ -176,7 +177,7 @@ static int _md_sysfs_attribute_scanf(const char *sysfs_dir,
 				     const char *attribute_fmt,
 				     void *attribute_value)
 {
-	char path[PATH_MAX+1], buffer[64];
+	char path[PATH_MAX+1], buffer[MD_MAX_SYSFS_SIZE];
 	FILE *fp;
 	int ret = 0;
 
@@ -231,15 +232,20 @@ static unsigned long dev_md_chunk_size(const char *sysfs_dir,
  */
 static int dev_md_level(const char *sysfs_dir, struct device *dev)
 {
+	char level_string[MD_MAX_SYSFS_SIZE];
 	const char *attribute = "level";
 	int level = -1;
 
 	if (_md_sysfs_attribute_scanf(sysfs_dir, dev, attribute,
-				      "raid%d", &level) != 1)
+				      "%s", &level_string) != 1)
 		return -1;
 
-	log_very_verbose("Device %s %s is raid%d.",
-			 dev_name(dev), attribute, level);
+	log_very_verbose("Device %s %s is %s.",
+			 dev_name(dev), attribute, level_string);
+
+	/*  We only care about raid - ignore linear/faulty/multipath etc. */
+	if (sscanf(level_string, "raid%d", &level) != 1)
+		return -1;
 
 	return level;
 }
@@ -320,14 +326,14 @@ unsigned long dev_md_stripe_width(const char *sysfs_dir, struct device *dev)
 
 #else
 
-int dev_is_md(struct device *dev __attribute((unused)),
-	      uint64_t *sb __attribute((unused)))
+int dev_is_md(struct device *dev __attribute__((unused)),
+	      uint64_t *sb __attribute__((unused)))
 {
 	return 0;
 }
 
-unsigned long dev_md_stripe_width(const char *sysfs_dir __attribute((unused)),
-				  struct device *dev  __attribute((unused)))
+unsigned long dev_md_stripe_width(const char *sysfs_dir __attribute__((unused)),
+				  struct device *dev  __attribute__((unused)))
 {
 	return 0UL;
 }

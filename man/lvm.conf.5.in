@@ -97,10 +97,10 @@ will be accepted or rejected (ignored).  Devices that don't match
 any patterns are accepted. If you want to reject patterns that
 don't match, end the list with "r/.*/".
 If there are several names for the same device (e.g. symbolic links
-in /dev), if any name matches any \fBa\fP pattern, the
-device is accepted; otherwise if any name matches any \fBr\fP
-pattern it is rejected; otherwise it is accepted.
-As an example, to ignore /dev/cdrom you could use:
+in /dev), if the first matching pattern in the list for any of the names is an
+\fBa\fP pattern, the device is accepted; otherwise if the first matching
+pattern in the list for any of the names is an \fBr\fP pattern it is rejected;
+otherwise it is accepted.  As an example, to ignore /dev/cdrom you could use:
 .br
 \fBdevices { filter=["r|cdrom|"] }\fP 
 .IP
@@ -165,6 +165,52 @@ use \fBpvs -o +pe_start\fP .  It will be a multiple of the requested
 \fBdata_alignment\fP plus the alignment_offset from
 \fBdata_alignment_offset_detection\fP (if enabled) or the pvcreate
 commandline.
+.IP
+\fBdisable_after_error_count\fP \(em During each LVM operation errors received
+from each device are counted.  If the counter of a particular device exceeds
+the limit set here, no further I/O is sent to that device for the remainder of
+the respective operation. Setting the parameter to 0 disables the counters
+altogether.
+.IP
+\fBpv_min_size\fP \(em
+Minimal size (in KB) of the block device which can be used as a PV.
+In clustered environment all nodes have to use the same value.
+Any value smaller than 512KB is ignored.  Up to and include version 2.02.84
+the default was 512KB.  From 2.02.85 onwards it was changed to 2MB to
+avoid floppy drives by default.
+.IP
+\fBissue_discards\fP \(em
+Issue discards to a logical volumes's underlying physical volume(s) when the
+logical volume is no longer using the physical volumes' space (e.g. lvremove,
+lvreduce, etc).  Discards inform the storage that a region is no longer in use.
+Storage that supports discards advertise the protocol specific way discards
+should be issued by the kernel (TRIM, UNMAP, or WRITE SAME with UNMAP bit set).
+Not all storage will support or benefit from discards but SSDs and thinly
+provisioned LUNs generally do.  If set to 1, discards will only be issued if
+both the storage and kernel provide support.  
+.IP
+.TP
+\fBallocation\fP \(em Space allocation policies
+.IP
+\fBcling_tag_list\fP \(em List of PV tags matched by the \fBcling\fP allocation policy.
+.IP
+When searching for free space to extend an LV, the \fBcling\fP
+allocation policy will choose space on the same PVs as the last
+segment of the existing LV.  If there is insufficient space and a
+list of tags is defined here, it will check whether any of them are
+attached to the PVs concerned and then seek to match those PV tags
+between existing extents and new extents.
+.IP 
+The @ prefix for tags is required.
+Use the special tag "@*" as a wildcard to match any PV tag and so use 
+all PV tags for this purpose.
+.IP
+For example, LVs are mirrored between two sites within a single VG.
+PVs are tagged with either @site1 or @site2 to indicate where
+they are situated and these two PV tags are selected for use with this
+allocation policy:
+.IP
+cling_tag_list = [ "@site1", "@site2" ]
 .TP
 \fBlog\fP \(em Default log settings
 .IP
@@ -377,6 +423,18 @@ metadata for a match.
 \fBtags\fP above).
 Logical volume and volume groups can also be included in the list
 by name e.g. vg00, vg00/lvol1.
+.IP
+\fBread_only_volume_list\fP \(em This acts as a filter through
+which all requests to activate a logical volume on this machine
+are passed.  A logical volume is activated in read-only mode (instead
+of read-write) if it matches an item in the list.  Volumes must first
+pass the \fBvolume_list\fP filter, if present.  Tags must be preceded
+by @ and are checked against all tags defined in the logical volume
+and volume group metadata for a match.
+@* is short-hand to check every tag set on the host machine (see
+\fBtags\fP above).
+Logical volume and volume groups can also be included in the list
+by name e.g. vg00, vg00/lvol1.
 .TP
 \fBmetadata\fP \(em Advanced metadata settings
 .IP
@@ -386,7 +444,8 @@ to store on each physical volume.
 Currently it can be set to 0, 1 or 2.  The default is 1.  
 If set to 2, one copy is placed at the beginning of the disk
 and the other is placed at the end.
-It can be overridden on the command line with \fB--metadatacopies\fP.
+It can be overridden on the command line with \fB--pvmetadatacopies\fP
+(see \fBpvcreate\fP).
 If creating a volume group with just one physical volume, it's a
 good idea to have 2 copies.  If creating a large volume group with
 many physical volumes, you may decide that 3 copies of the metadata
@@ -405,6 +464,40 @@ logical volume structures will need additional space for their metadata.
 The metadata areas are treated as circular buffers, so
 unused space becomes filled with an archive of the most recent
 previous versions of the metadata.
+.IP
+\fBpvmetadataignore\fP When creating a physical volume using the LVM2
+metadata format, this states whether metadata areas should be ignored.
+The default is "n".  If metadata areas on a physical volume are ignored,
+LVM will not not store metadata in the metadata areas present on newly
+created Physical Volumes.  The option can be overridden on the command
+line with \fB--metadataignore\fP (See \fBpvcreate\fP and \fBpvchange\fP).
+Metadata areas cannot be created or extended after Logical Volumes have
+been allocated on the device.
+If you do not want to store metadata on this device, it is still wise
+always to allocate a metadata area (use a non-zero value for
+\fB--pvmetadatacopies\fP) in case you need it in the future and to use
+this option to instruct LVM2 to ignore it.
+.IP
+\fBvgmetadatacopies\fP \(em When creating a volume group using the
+LVM2 metadata format, this is the default number of copies of metadata
+desired across all the physical volumes in the volume group.  If set to
+a non-zero value, LVM will automatically set or clear the metadataignore
+flag on the physical volumes (see \fBpvcreate\fP and \fBpvchange\fP
+\fB--metadataignore\fP) in order to achieve the desired number of metadata
+copies.  An LVM command that adds or removes physical volumes (for example,
+\fBvgextend\fP, \fBvgreduce\fP, \fBvgsplit\fP, or \fBvgmerge\fP), may cause
+LVM to automatically set or clear the metadataignore flags.  Also, if
+physical volumes go missing or reappear, or a new number of copies is
+explicitly set (see \fBvgchange --vgmetadatacopies\fP), LVM may adjust
+the metadataignore flags.
+Set \fBvgmetadatacopies\fP to 0 instructs LVM not to set or clear the
+metadataignore flags automatically.  You may set a value larger than the
+sum of all metadata areas on all physical volumes.  The value can
+be overridden on the command line with \fB--vgmetadatacopies\fP for various
+commands (for example, \fBvgcreate\fP and \fBvgchange\fP), and can be
+queryied with the \fBvg_mda_copies\fP field of \fBvgs\fP.  This option
+is useful for volume groups containing large numbers of physical volumes
+with metadata as it may be used to minimize metadata read and write overhead.
 .IP
 \fBdirs\fP \(em List of directories holding live copies of LVM2
 metadata as text files.  These directories must not be on logical

@@ -18,6 +18,7 @@
 #include "crc.h"
 #include "xlate.h"
 #include "lvmcache.h"
+#include "lvmetad.h"
 #include "metadata.h"
 
 #include <sys/stat.h>
@@ -56,11 +57,6 @@ static struct labeller_i *_alloc_li(const char *name, struct labeller *l)
 	return li;
 }
 
-static void _free_li(struct labeller_i *li)
-{
-	dm_free(li);
-}
-
 int label_init(void)
 {
 	dm_list_init(&_labellers);
@@ -69,14 +65,12 @@ int label_init(void)
 
 void label_exit(void)
 {
-	struct dm_list *c, *n;
-	struct labeller_i *li;
+	struct labeller_i *li, *tli;
 
-	for (c = _labellers.n; c && c != &_labellers; c = n) {
-		n = c->n;
-		li = dm_list_item(c, struct labeller_i);
+	dm_list_iterate_items_safe(li, tli, &_labellers) {
+		dm_list_del(&li->list);
 		li->l->ops->destroy(li->l);
-		_free_li(li);
+		dm_free(li);
 	}
 
 	dm_list_init(&_labellers);
@@ -114,7 +108,7 @@ static struct labeller *_find_labeller(struct device *dev, char *buf,
 	struct lvmcache_info *info;
 	uint64_t sector;
 	int found = 0;
-	char readbuf[LABEL_SCAN_SIZE] __attribute((aligned(8)));
+	char readbuf[LABEL_SCAN_SIZE] __attribute__((aligned(8)));
 
 	if (!dev_read(dev, scan_sector << SECTOR_SHIFT,
 		      LABEL_SCAN_SIZE, readbuf)) {
@@ -142,8 +136,8 @@ static struct labeller *_find_labeller(struct device *dev, char *buf,
 					 sector + scan_sector);
 				continue;
 			}
-			if (calc_crc(INITIAL_CRC, &lh->offset_xl, LABEL_SIZE -
-				     ((uintptr_t) &lh->offset_xl - (uintptr_t) lh)) !=
+			if (calc_crc(INITIAL_CRC, (uint8_t *)&lh->offset_xl, LABEL_SIZE -
+				     ((uint8_t *) &lh->offset_xl - (uint8_t *) lh)) !=
 			    xlate32(lh->crc_xl)) {
 				log_info("Label checksum incorrect on %s - "
 					 "ignoring", dev_name(dev));
@@ -156,8 +150,10 @@ static struct labeller *_find_labeller(struct device *dev, char *buf,
 		dm_list_iterate_items(li, &_labellers) {
 			if (li->l->ops->can_handle(li->l, (char *) lh,
 						   sector + scan_sector)) {
-				log_very_verbose("%s: %s label detected",
-						 dev_name(dev), li->name);
+				log_very_verbose("%s: %s label detected at "
+					         "sector %" PRIu64, 
+						 dev_name(dev), li->name,
+						 sector + scan_sector);
 				if (found) {
 					log_error("Ignoring additional label "
 						  "on %s at sector %" PRIu64,
@@ -177,9 +173,9 @@ static struct labeller *_find_labeller(struct device *dev, char *buf,
 
       out:
 	if (!found) {
-		if ((info = info_from_pvid(dev->pvid, 0)))
-			lvmcache_update_vgname_and_id(info, info->fmt->orphan_vg_name,
-						      info->fmt->orphan_vg_name,
+		if ((info = lvmcache_info_from_pvid(dev->pvid, 0)))
+			lvmcache_update_vgname_and_id(info, lvmcache_fmt(info)->orphan_vg_name,
+						      lvmcache_fmt(info)->orphan_vg_name,
 						      0, NULL);
 		log_very_verbose("%s: No label detected", dev_name(dev));
 	}
@@ -190,8 +186,8 @@ static struct labeller *_find_labeller(struct device *dev, char *buf,
 /* FIXME Also wipe associated metadata area headers? */
 int label_remove(struct device *dev)
 {
-	char buf[LABEL_SIZE] __attribute((aligned(8)));
-	char readbuf[LABEL_SCAN_SIZE] __attribute((aligned(8)));
+	char buf[LABEL_SIZE] __attribute__((aligned(8)));
+	char readbuf[LABEL_SCAN_SIZE] __attribute__((aligned(8)));
 	int r = 1;
 	uint64_t sector;
 	int wipe;
@@ -260,24 +256,24 @@ int label_remove(struct device *dev)
 int label_read(struct device *dev, struct label **result,
 		uint64_t scan_sector)
 {
-	char buf[LABEL_SIZE] __attribute((aligned(8)));
+	char buf[LABEL_SIZE] __attribute__((aligned(8)));
 	struct labeller *l;
 	uint64_t sector;
 	struct lvmcache_info *info;
 	int r = 0;
 
-	if ((info = info_from_pvid(dev->pvid, 1))) {
+	if ((info = lvmcache_info_from_pvid(dev->pvid, 1))) {
 		log_debug("Using cached label for %s", dev_name(dev));
-		*result = info->label;
+		*result = lvmcache_get_label(info);
 		return 1;
 	}
 
-	if (!dev_open(dev)) {
+	if (!dev_open_readonly(dev)) {
 		stack;
 
-		if ((info = info_from_pvid(dev->pvid, 0)))
-			lvmcache_update_vgname_and_id(info, info->fmt->orphan_vg_name,
-						      info->fmt->orphan_vg_name,
+		if ((info = lvmcache_info_from_pvid(dev->pvid, 0)))
+			lvmcache_update_vgname_and_id(info, lvmcache_fmt(info)->orphan_vg_name,
+						      lvmcache_fmt(info)->orphan_vg_name,
 						      0, NULL);
 
 		return r;
@@ -299,7 +295,7 @@ int label_read(struct device *dev, struct label **result,
 /* Caller may need to use label_get_handler to create label struct! */
 int label_write(struct device *dev, struct label *label)
 {
-	char buf[LABEL_SIZE] __attribute((aligned(8)));
+	char buf[LABEL_SIZE] __attribute__((aligned(8)));
 	struct label_header *lh = (struct label_header *) buf;
 	int r = 1;
 
@@ -323,8 +319,8 @@ int label_write(struct device *dev, struct label *label)
 	if (!(label->labeller->ops->write)(label, buf))
 		return_0;
 
-	lh->crc_xl = xlate32(calc_crc(INITIAL_CRC, &lh->offset_xl, LABEL_SIZE -
-				      ((uintptr_t) &lh->offset_xl - (uintptr_t) lh)));
+	lh->crc_xl = xlate32(calc_crc(INITIAL_CRC, (uint8_t *)&lh->offset_xl, LABEL_SIZE -
+				      ((uint8_t *) &lh->offset_xl - (uint8_t *) lh)));
 
 	if (!dev_open(dev))
 		return_0;
@@ -347,15 +343,15 @@ int label_write(struct device *dev, struct label *label)
 int label_verify(struct device *dev)
 {
 	struct labeller *l;
-	char buf[LABEL_SIZE] __attribute((aligned(8)));
+	char buf[LABEL_SIZE] __attribute__((aligned(8)));
 	uint64_t sector;
 	struct lvmcache_info *info;
 	int r = 0;
 
-	if (!dev_open(dev)) {
-		if ((info = info_from_pvid(dev->pvid, 0)))
-			lvmcache_update_vgname_and_id(info, info->fmt->orphan_vg_name,
-						      info->fmt->orphan_vg_name,
+	if (!dev_open_readonly(dev)) {
+		if ((info = lvmcache_info_from_pvid(dev->pvid, 0)))
+			lvmcache_update_vgname_and_id(info, lvmcache_fmt(info)->orphan_vg_name,
+						      lvmcache_fmt(info)->orphan_vg_name,
 						      0, NULL);
 
 		return_0;
@@ -383,11 +379,10 @@ struct label *label_create(struct labeller *labeller)
 {
 	struct label *label;
 
-	if (!(label = dm_malloc(sizeof(*label)))) {
+	if (!(label = dm_zalloc(sizeof(*label)))) {
 		log_error("label allocaction failed");
 		return NULL;
 	}
-	memset(label, 0, sizeof(*label));
 
 	label->labeller = labeller;
 

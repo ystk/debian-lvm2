@@ -19,6 +19,7 @@
 #include "activate.h"
 #include "toolcontext.h"
 #include "segtype.h"
+#include "defaults.h"
 
 #define SIZE_BUF 128
 
@@ -26,14 +27,16 @@ typedef enum { SIZE_LONG = 0, SIZE_SHORT = 1, SIZE_UNIT = 2 } size_len_t;
 
 static const struct {
 	alloc_policy_t alloc;
-	const char str[12]; /* must be changed when size extends 11 chars */
+	const char str[14]; /* must be changed when size extends 13 chars */
+	const char repchar;
 } _policies[] = {
 	{
-	ALLOC_CONTIGUOUS, "contiguous"}, {
-	ALLOC_CLING, "cling"}, {
-	ALLOC_NORMAL, "normal"}, {
-	ALLOC_ANYWHERE, "anywhere"}, {
-	ALLOC_INHERIT, "inherit"}
+	ALLOC_CONTIGUOUS, "contiguous", 'c'}, {
+	ALLOC_CLING, "cling", 'l'}, {
+	ALLOC_CLING_BY_TAGS, "cling_by_tags", 't'}, {	/* Only used in log mesgs */
+	ALLOC_NORMAL, "normal", 'n'}, {
+	ALLOC_ANYWHERE, "anywhere", 'a'}, {
+	ALLOC_INHERIT, "inherit", 'i'}
 };
 
 static const int _num_policies = sizeof(_policies) / sizeof(*_policies);
@@ -42,14 +45,23 @@ uint64_t units_to_bytes(const char *units, char *unit_type)
 {
 	char *ptr = NULL;
 	uint64_t v;
+	double custom_value = 0;
+	uint64_t multiplier;
 
 	if (isdigit(*units)) {
-		v = (uint64_t) strtod(units, &ptr);
+		custom_value = strtod(units, &ptr);
 		if (ptr == units)
 			return 0;
+		v = (uint64_t) strtoull(units, NULL, 10);
+		if ((double) v == custom_value)
+			custom_value = 0;	/* Use integer arithmetic */
 		units = ptr;
 	} else
 		v = 1;
+
+	/* Only one units char permitted. */
+	if (units[0] && units[1])
+		return 0;
 
 	if (v == 1)
 		*unit_type = *units;
@@ -59,65 +71,76 @@ uint64_t units_to_bytes(const char *units, char *unit_type)
 	switch (*units) {
 	case 'h':
 	case 'H':
-		v = UINT64_C(1);
+		multiplier = v = UINT64_C(1);
 		*unit_type = *units;
 		break;
 	case 'b':
 	case 'B':
-		v *= UINT64_C(1);
+		multiplier = UINT64_C(1);
 		break;
 #define KILO UINT64_C(1024)
 	case 's':
 	case 'S':
-		v *= (KILO/2);
+		multiplier = (KILO/2);
 		break;
 	case 'k':
-		v *= KILO;
+		multiplier = KILO;
 		break;
 	case 'm':
-		v *= KILO * KILO;
+		multiplier = KILO * KILO;
 		break;
 	case 'g':
-		v *= KILO * KILO * KILO;
+		multiplier = KILO * KILO * KILO;
 		break;
 	case 't':
-		v *= KILO * KILO * KILO * KILO;
+		multiplier = KILO * KILO * KILO * KILO;
 		break;
 	case 'p':
-		v *= KILO * KILO * KILO * KILO * KILO;
+		multiplier = KILO * KILO * KILO * KILO * KILO;
 		break;
 	case 'e':
-		v *= KILO * KILO * KILO * KILO * KILO * KILO;
+		multiplier = KILO * KILO * KILO * KILO * KILO * KILO;
 		break;
 #undef KILO
 #define KILO UINT64_C(1000)
 	case 'K':
-		v *= KILO;
+		multiplier = KILO;
 		break;
 	case 'M':
-		v *= KILO * KILO;
+		multiplier = KILO * KILO;
 		break;
 	case 'G':
-		v *= KILO * KILO * KILO;
+		multiplier = KILO * KILO * KILO;
 		break;
 	case 'T':
-		v *= KILO * KILO * KILO * KILO;
+		multiplier = KILO * KILO * KILO * KILO;
 		break;
 	case 'P':
-		v *= KILO * KILO * KILO * KILO * KILO;
+		multiplier = KILO * KILO * KILO * KILO * KILO;
 		break;
 	case 'E':
-		v *= KILO * KILO * KILO * KILO * KILO * KILO;
+		multiplier = KILO * KILO * KILO * KILO * KILO * KILO;
 		break;
 #undef KILO
 	default:
 		return 0;
 	}
 
-	if (*(units + 1))
-		return 0;
+	if (custom_value)
+		return (uint64_t) (custom_value * multiplier);
+	else
+		return v * multiplier;
+}
 
-	return v;
+char alloc_policy_char(alloc_policy_t alloc)
+{
+	int i;
+
+	for (i = 0; i < _num_policies; i++)
+		if (_policies[i].alloc == alloc)
+			return _policies[i].repchar;
+
+	return '-';
 }
 
 const char *get_alloc_string(alloc_policy_t alloc)
@@ -135,12 +158,16 @@ alloc_policy_t get_alloc_from_string(const char *str)
 {
 	int i;
 
+	/* cling_by_tags is part of cling */
+	if (!strcmp("cling_by_tags", str))
+		return ALLOC_CLING;
+
 	for (i = 0; i < _num_policies; i++)
 		if (!strcmp(_policies[i].str, str))
 			return _policies[i].alloc;
 
 	/* Special case for old metadata */
-	if(!strcmp("next free", str))
+	if (!strcmp("next free", str))
 		return ALLOC_NORMAL;
 
 	log_error("Unrecognised allocation policy %s", str);
@@ -307,7 +334,7 @@ const char *display_size(const struct cmd_context *cmd, uint64_t size)
 
 void pvdisplay_colons(const struct physical_volume *pv)
 {
-	char uuid[64] __attribute((aligned(8)));
+	char uuid[64] __attribute__((aligned(8)));
 
 	if (!pv)
 		return;
@@ -358,9 +385,9 @@ void pvdisplay_segments(const struct physical_volume *pv)
 /* FIXME Include label fields */
 void pvdisplay_full(const struct cmd_context *cmd,
 		    const struct physical_volume *pv,
-		    void *handle __attribute((unused)))
+		    void *handle __attribute__((unused)))
 {
-	char uuid[64] __attribute((aligned(8)));
+	char uuid[64] __attribute__((aligned(8)));
 	const char *size;
 
 	uint32_t pe_free;
@@ -423,12 +450,12 @@ void pvdisplay_full(const struct cmd_context *cmd,
 	log_print(" ");
 }
 
-int pvdisplay_short(const struct cmd_context *cmd __attribute((unused)),
-		    const struct volume_group *vg __attribute((unused)),
+int pvdisplay_short(const struct cmd_context *cmd __attribute__((unused)),
+		    const struct volume_group *vg __attribute__((unused)),
 		    const struct physical_volume *pv,
-		    void *handle __attribute((unused)))
+		    void *handle __attribute__((unused)))
 {
-	char uuid[64] __attribute((aligned(8)));
+	char uuid[64] __attribute__((aligned(8)));
 
 	if (!pv)
 		return 0;
@@ -452,14 +479,15 @@ void lvdisplay_colons(const struct logical_volume *lv)
 {
 	int inkernel;
 	struct lvinfo info;
-	inkernel = lv_info(lv->vg->cmd, lv, &info, 1, 0) && info.exists;
+	inkernel = lv_info(lv->vg->cmd, lv, 0, &info, 1, 0) && info.exists;
 
 	log_print("%s%s/%s:%s:%" PRIu64 ":%d:-1:%d:%" PRIu64 ":%d:-1:%d:%d:%d:%d",
 		  lv->vg->cmd->dev_dir,
 		  lv->vg->name,
 		  lv->name,
 		  lv->vg->name,
-		  (lv->status & (LVM_READ | LVM_WRITE)) >> 8, inkernel ? 1 : 0,
+		  ((lv->status & (LVM_READ | LVM_WRITE)) >> 8) |
+		  ((inkernel && info.read_only) ? 4 : 0), inkernel ? 1 : 0,
 		  /* FIXME lv->lv_number,  */
 		  inkernel ? info.open_count : 0, lv->size, lv->le_count,
 		  /* FIXME Add num allocated to struct! lv->lv_allocated_le, */
@@ -469,30 +497,57 @@ void lvdisplay_colons(const struct logical_volume *lv)
 
 int lvdisplay_full(struct cmd_context *cmd,
 		   const struct logical_volume *lv,
-		   void *handle __attribute((unused)))
+		   void *handle __attribute__((unused)))
 {
 	struct lvinfo info;
 	int inkernel, snap_active = 0;
-	char uuid[64] __attribute((aligned(8)));
+	char uuid[64] __attribute__((aligned(8)));
+	const char *access_str;
 	struct lv_segment *snap_seg = NULL, *mirror_seg = NULL;
-	float snap_percent;	/* fused, fsize; */
-	percent_range_t percent_range;
+	struct lv_segment *seg = NULL;
+	int lvm1compat;
+	percent_t snap_percent;
+	int thin_data_active = 0, thin_metadata_active = 0;
+	percent_t thin_data_percent, thin_metadata_percent;
+	int thin_active = 0;
+	percent_t thin_percent;
 
 	if (!id_write_format(&lv->lvid.id[1], uuid, sizeof(uuid)))
 		return_0;
 
-	inkernel = lv_info(cmd, lv, &info, 1, 1) && info.exists;
+	inkernel = lv_info(cmd, lv, 0, &info, 1, 1) && info.exists;
+
+	if ((lv->status & LVM_WRITE) && inkernel && info.read_only)
+		access_str = "read/write (activated read only)";
+	else if (lv->status & LVM_WRITE)
+		access_str = "read/write";
+	else
+		access_str = "read only";
 
 	log_print("--- Logical volume ---");
 
-	log_print("LV Name                %s%s/%s", lv->vg->cmd->dev_dir,
-		  lv->vg->name, lv->name);
+	lvm1compat = find_config_tree_int(cmd, "global/lvdisplay_shows_full_device_path",
+					  DEFAULT_LVDISPLAY_SHOWS_FULL_DEVICE_PATH);
+
+	if (lvm1compat)
+		/* /dev/vgname/lvname doen't actually exist for internal devices */
+		log_print("LV Name                %s%s/%s",
+			  lv->vg->cmd->dev_dir, lv->vg->name, lv->name);
+	else if (lv_is_visible(lv)) {
+		/* Thin pool does not have /dev/vg/name link */
+		if (!lv_is_thin_pool(lv))
+			log_print("LV Path                %s%s/%s",
+				  lv->vg->cmd->dev_dir,
+				  lv->vg->name, lv->name);
+		log_print("LV Name                %s", lv->name);
+	} else
+		log_print("Internal LV Name       %s", lv->name);
+
 	log_print("VG Name                %s", lv->vg->name);
-
 	log_print("LV UUID                %s", uuid);
-
-	log_print("LV Write Access        %s",
-		  (lv->status & LVM_WRITE) ? "read/write" : "read only");
+	log_print("LV Write Access        %s", access_str);
+	log_print("LV Creation host, time %s, %s",
+		  lv_host_dup(cmd->mem, lv), lv_time_dup(cmd->mem, lv));
 
 	if (lv_is_origin(lv)) {
 		log_print("LV snapshot status     source of");
@@ -501,28 +556,60 @@ int lvdisplay_full(struct cmd_context *cmd,
 				       origin_list) {
 			if (inkernel &&
 			    (snap_active = lv_snapshot_percent(snap_seg->cow,
-							       &snap_percent,
-							       &percent_range)))
-				if (percent_range == PERCENT_INVALID)
+							       &snap_percent)))
+				if (snap_percent == PERCENT_INVALID)
 					snap_active = 0;
-			log_print("                       %s%s/%s [%s]",
-				  lv->vg->cmd->dev_dir, lv->vg->name,
-				  snap_seg->cow->name,
-				  snap_active ? "active" : "INACTIVE");
+			if (lvm1compat)
+				log_print("                       %s%s/%s [%s]",
+					  lv->vg->cmd->dev_dir, lv->vg->name,
+					  snap_seg->cow->name,
+					  snap_active ? "active" : "INACTIVE");
+			else
+				log_print("                       %s [%s]",
+					  snap_seg->cow->name,
+					  snap_active ? "active" : "INACTIVE");
 		}
 		snap_seg = NULL;
 	} else if ((snap_seg = find_cow(lv))) {
 		if (inkernel &&
 		    (snap_active = lv_snapshot_percent(snap_seg->cow,
-						       &snap_percent,
-						       &percent_range)))
-			if (percent_range == PERCENT_INVALID)
+						       &snap_percent)))
+			if (snap_percent == PERCENT_INVALID)
 				snap_active = 0;
 
-		log_print("LV snapshot status     %s destination for %s%s/%s",
-			  snap_active ? "active" : "INACTIVE",
-			  lv->vg->cmd->dev_dir, lv->vg->name,
-			  snap_seg->origin->name);
+		if (lvm1compat)
+			log_print("LV snapshot status     %s destination for %s%s/%s",
+				  snap_active ? "active" : "INACTIVE",
+				  lv->vg->cmd->dev_dir, lv->vg->name,
+				  snap_seg->origin->name);
+		else
+			log_print("LV snapshot status     %s destination for %s",
+				  snap_active ? "active" : "INACTIVE",
+				  snap_seg->origin->name);
+	}
+
+	if (lv_is_thin_volume(lv)) {
+		seg = first_seg(lv);
+		log_print("LV Pool name           %s", seg->pool_lv->name);
+		if (seg->origin)
+			log_print("LV Thin origin name    %s",
+				  seg->origin->name);
+		if (inkernel)
+			thin_active = lv_thin_percent(lv, 0, &thin_percent);
+	} else if (lv_is_thin_pool(lv)) {
+		if (inkernel) {
+			thin_data_active = lv_thin_pool_percent(lv, 0, &thin_data_percent);
+			thin_metadata_active = lv_thin_pool_percent(lv, 1, &thin_metadata_percent);
+		}
+		/* FIXME: display thin_pool targets transid for activated LV as well */
+		seg = first_seg(lv);
+		log_print("LV Pool transaction ID %" PRIu64, seg->transaction_id);
+		log_print("LV Pool metadata       %s", seg->metadata_lv->name);
+		log_print("LV Pool data           %s", seg_lv(seg, 0)->name);
+		log_print("LV Pool chunk size     %s",
+			  display_size(cmd, seg->chunk_size));
+		log_print("LV Zero new blocks     %s",
+			  seg->zero_new_blocks ? "yes" : "no");
 	}
 
 	if (inkernel && info.suspended)
@@ -542,6 +629,18 @@ int lvdisplay_full(struct cmd_context *cmd,
 		  display_size(cmd,
 			       snap_seg ? snap_seg->origin->size : lv->size));
 
+	if (thin_data_active)
+		log_print("Allocated pool data    %.2f%%",
+			  percent_to_float(thin_data_percent));
+
+	if (thin_metadata_active)
+		log_print("Allocated metadata     %.2f%%",
+			  percent_to_float(thin_metadata_percent));
+
+	if (thin_active)
+		log_print("Mapped size            %.2f%%",
+			  percent_to_float(thin_percent));
+
 	log_print("Current LE             %u",
 		  snap_seg ? snap_seg->origin->le_count : lv->le_count);
 
@@ -551,14 +650,15 @@ int lvdisplay_full(struct cmd_context *cmd,
 		log_print("COW-table LE           %u", lv->le_count);
 
 		if (snap_active)
-			log_print("Allocated to snapshot  %.2f%% ", snap_percent);	
+			log_print("Allocated to snapshot  %.2f%%",
+				  percent_to_float(snap_percent));
 
 		log_print("Snapshot chunk size    %s",
 			  display_size(cmd, (uint64_t) snap_seg->chunk_size));
 	}
 
 	if (lv->status & MIRRORED) {
- 		mirror_seg = first_seg(lv);
+		mirror_seg = first_seg(lv);
 		log_print("Mirrored volumes       %" PRIu32, mirror_seg->area_count);
 		if (lv->status & CONVERTING)
 			log_print("LV type        Mirror undergoing conversion");
@@ -646,7 +746,7 @@ int lvdisplay_segments(const struct logical_volume *lv)
 	return 1;
 }
 
-void vgdisplay_extents(const struct volume_group *vg __attribute((unused)))
+void vgdisplay_extents(const struct volume_group *vg __attribute__((unused)))
 {
 }
 
@@ -654,7 +754,7 @@ void vgdisplay_full(const struct volume_group *vg)
 {
 	uint32_t access_str;
 	uint32_t active_pvs;
-	char uuid[64] __attribute((aligned(8)));
+	char uuid[64] __attribute__((aligned(8)));
 
 	active_pvs = vg->pv_count - vg_missing_pv_count(vg);
 
@@ -664,7 +764,7 @@ void vgdisplay_full(const struct volume_group *vg)
 	log_print("Format                %s", vg->fid->fmt->name);
 	if (vg->fid->fmt->features & FMT_MDAS) {
 		log_print("Metadata Areas        %d",
-			  dm_list_size(&vg->fid->metadata_areas));
+			  vg_mda_count(vg));
 		log_print("Metadata Sequence No  %d", vg->seqno);
 	}
 	access_str = vg->status & (LVM_READ | LVM_WRITE);
@@ -728,7 +828,7 @@ void vgdisplay_colons(const struct volume_group *vg)
 {
 	uint32_t active_pvs;
 	const char *access_str;
-	char uuid[64] __attribute((aligned(8)));
+	char uuid[64] __attribute__((aligned(8)));
 
 	active_pvs = vg->pv_count - vg_missing_pv_count(vg);
 
@@ -811,9 +911,10 @@ char yes_no_prompt(const char *prompt, ...)
 	do {
 		if (c == '\n' || !c) {
 			va_start(ap, prompt);
-			vprintf(prompt, ap);
+			vfprintf(stderr, prompt, ap);
 			va_end(ap);
-			fflush(stdout);
+			fflush(stderr);
+			ret = 0;
 		}
 
 		if ((c = getchar()) == EOF) {
@@ -822,9 +923,14 @@ char yes_no_prompt(const char *prompt, ...)
 		}
 
 		c = tolower(c);
-		if ((c == 'y') || (c == 'n'))
-			ret = c;
-	} while (!ret || c != '\n');
+		if ((c == 'y') || (c == 'n')) {
+			/* If both 'y' and 'n' given, begin again. */
+			if (ret && c != ret)
+				ret = -1;
+			else
+				ret = c;
+		}
+	} while (ret < 1 || c != '\n');
 
 	sigint_restore();
 

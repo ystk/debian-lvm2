@@ -15,6 +15,7 @@
  */
 
 #include "tools.h"
+#include "metadata.h"
 
 struct pvresize_params {
 	uint64_t new_size;
@@ -30,16 +31,11 @@ static int _pv_resize_single(struct cmd_context *cmd,
 {
 	struct pv_list *pvl;
 	uint64_t size = 0;
-	uint32_t new_pe_count = 0;
 	int r = 0;
-	struct dm_list mdas;
 	const char *pv_name = pv_dev_name(pv);
 	const char *vg_name = pv_vg_name(pv);
-	struct lvmcache_info *info;
-	int mda_count = 0;
 	struct volume_group *old_vg = vg;
-
-	dm_list_init(&mdas);
+	int vg_needs_pv_write = 0;
 
 	if (is_orphan_vg(vg_name)) {
 		if (!lock_vol(cmd, vg_name, LCK_VG_WRITE)) {
@@ -47,18 +43,16 @@ static int _pv_resize_single(struct cmd_context *cmd,
 			return 0;
 		}
 
-		if (!(pv = pv_read(cmd, pv_name, &mdas, NULL, 1, 0))) {
+		if (!(pv = pv_read(cmd, pv_name, 1, 0))) {
 			unlock_vg(cmd, vg_name);
 			log_error("Unable to read PV \"%s\"", pv_name);
 			return 0;
 		}
-
-		mda_count = dm_list_size(&mdas);
 	} else {
 		vg = vg_read_for_update(cmd, vg_name, NULL, 0);
 
 		if (vg_read_error(vg)) {
-			vg_release(vg);
+			release_vg(vg);
 			log_error("Unable to read volume group \"%s\".",
 				  vg_name);
 			return 0;
@@ -72,22 +66,8 @@ static int _pv_resize_single(struct cmd_context *cmd,
 
 		pv = pvl->pv;
 
-		if (!(info = info_from_pvid(pv->dev->pvid, 0))) {
-			log_error("Can't get info for PV %s in volume group %s",
-				  pv_name, vg->name);
-			goto out;
-		}
-
-		mda_count = dm_list_size(&info->mdas);
-
 		if (!archive(vg))
 			goto out;
-	}
-
-	/* FIXME Create function to test compatibility properly */
-	if (mda_count > 1) {
-		log_error("%s: too many metadata areas for pvresize", pv_name);
-		goto out;
 	}
 
 	if (!(pv->fmt->features & FMT_RESIZE_PV)) {
@@ -111,60 +91,45 @@ static int _pv_resize_single(struct cmd_context *cmd,
 		size = new_size;
 	}
 
-	if (size < PV_MIN_SIZE) {
-		log_error("%s: Size must exceed minimum of %ld sectors.",
-			  pv_name, PV_MIN_SIZE);
-		goto out;
-	}
-
-	if (size < pv_pe_start(pv)) {
-		log_error("%s: Size must exceed physical extent start of "
-			  "%" PRIu64 " sectors.", pv_name, pv_pe_start(pv));
-		goto out;
-	}
-
-	pv->size = size;
-
-	if (vg) {
-		pv->size -= pv_pe_start(pv);
-		new_pe_count = pv_size(pv) / vg->extent_size;
-
- 		if (!new_pe_count) {
-			log_error("%s: Size must leave space for at "
-				  "least one physical extent of "
-				  "%" PRIu32 " sectors.", pv_name,
-				  pv_pe_size(pv));
-			goto out;
-		}
-
-		if (!pv_resize(pv, vg, new_pe_count))
-			goto_out;
-	}
-
 	log_verbose("Resizing volume \"%s\" to %" PRIu64 " sectors.",
 		    pv_name, pv_size(pv));
 
+	if (!pv_resize(pv, vg, size))
+		goto_out;
+
 	log_verbose("Updating physical volume \"%s\"", pv_name);
-	if (!is_orphan_vg(vg_name)) {
-		if (!vg_write(vg) || !vg_commit(vg)) {
-			log_error("Failed to store physical volume \"%s\" in "
-				  "volume group \"%s\"", pv_name, vg->name);
-			goto out;
-		}
-		backup(vg);
-	} else if (!(pv_write(cmd, pv, NULL, INT64_C(-1)))) {
+
+	/* Write PV label only if this an orphan PV or it has 2nd mda. */
+	if ((is_orphan_vg(vg_name) ||
+	     (vg_needs_pv_write = (fid_get_mda_indexed(vg->fid,
+			(const char *) &pv->id, ID_LEN, 1) != NULL))) &&
+	    !pv_write(cmd, pv, 1)) {
 		log_error("Failed to store physical volume \"%s\"",
 			  pv_name);
 		goto out;
+	}
+
+	if (!is_orphan_vg(vg_name)) {
+		if (!vg_write(vg) || !vg_commit(vg)) {
+			log_error("Failed to store physical volume \"%s\" in "
+				  "volume group \"%s\"", pv_name, vg_name);
+			goto out;
+		}
+		backup(vg);
 	}
 
 	log_print("Physical volume \"%s\" changed", pv_name);
 	r = 1;
 
 out:
+	if (!r && vg_needs_pv_write)
+		log_error("Use pvcreate and vgcfgrestore "
+			  "to repair from archived metadata.");
 	unlock_vg(cmd, vg_name);
+	if (is_orphan_vg(vg_name))
+		free_pv_fid(pv);
 	if (!old_vg)
-		vg_release(vg);
+		release_vg(vg);
 	return r;
 }
 
@@ -197,7 +162,7 @@ int pvresize(struct cmd_context *cmd, int argc, char **argv)
 		return EINVALID_CMD_LINE;
 	}
 
-	if (arg_sign_value(cmd, physicalvolumesize_ARG, 0) == SIGN_MINUS) {
+	if (arg_sign_value(cmd, physicalvolumesize_ARG, SIGN_NONE) == SIGN_MINUS) {
 		log_error("Physical volume size may not be negative");
 		return 0;
 	}

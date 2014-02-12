@@ -6,6 +6,9 @@
 #
 # To put this file in a different directory and override @DEFAULT_SYS_DIR@ set
 # the environment variable LVM_SYSTEM_DIR before running the tools.
+#
+# N.B. Take care that each setting only appears once if uncommenting
+# example settings in this file.
 
 
 # This section allows you to configure which block devices should
@@ -18,6 +21,16 @@ devices {
     # An array of directories that contain the device nodes you wish
     # to use with LVM2.
     scan = [ "/dev" ]
+
+    # If set, the cache of block device nodes with all associated symlinks
+    # will be constructed out of the existing udev database content.
+    # This avoids using and opening any inapplicable non-block devices or
+    # subdirectories found in the device directory. This setting is applied
+    # to udev-managed device directory only, other directories will be scanned
+    # fully. LVM2 needs to be compiled with udev support for this setting to
+    # take effect. N.B. Any device node or symlink not managed by udev in
+    # udev directory will be ignored with this setting on.
+    obtain_device_list_from_udev = 1
 
     # If several entries in the scanned directories correspond to the
     # same block device and the tools need to display a name for device,
@@ -38,9 +51,11 @@ devices {
 
     # Be careful if there there are symbolic links or multiple filesystem 
     # entries for the same device as each name is checked separately against
-    # the list of patterns.  The effect is that if any name matches any 'a'
-    # pattern, the device is accepted; otherwise if any name matches any 'r'
-    # pattern it is rejected; otherwise it is accepted.
+    # the list of patterns.  The effect is that if the first pattern in the 
+    # list to match a name is an 'a' pattern for any of the names, the device
+    # is accepted; otherwise if the first pattern in the list to match a name
+    # is an 'r' pattern for any of the names it is rejected; otherwise it is
+    # accepted.
 
     # Don't have more than one filter line active at once: only one gets used.
 
@@ -88,6 +103,11 @@ devices {
     # 1 enables; 0 disables.
     sysfs_scan = 1
 
+    # By default, LVM2 will ignore devices used as component paths
+    # of device-mapper multipath devices.
+    # 1 enables; 0 disables.
+    multipath_component_detection = 1
+
     # By default, LVM2 will ignore devices used as components of
     # software RAID (md) devices by looking for md superblocks.
     # 1 enables; 0 disables.
@@ -97,6 +117,10 @@ devices {
     # will align its data blocks with the md device's stripe-width.
     # 1 enables; 0 disables.
     md_chunk_alignment = 1
+
+    # Default alignment of the start of a data area in MB.  If set to 0,
+    # a value of 64KB will be used.  Set to 1 for 1MiB, 2 for 2MiB, etc.
+    # default_data_alignment = @DEFAULT_DATA_ALIGNMENT@
 
     # By default, the start of a PV's data area will be a multiple of
     # the 'minimum_io_size' or 'optimal_io_size' exposed in sysfs.
@@ -111,9 +135,9 @@ devices {
     data_alignment_detection = 1
 
     # Alignment (in KB) of start of data area when creating a new PV.
-    # If a PV is placed directly upon an md device and md_chunk_alignment or
-    # data_alignment_detection is enabled this parameter is ignored.
-    # Set to 0 for the default alignment of 64KB or page size, if larger.
+    # md_chunk_alignment and data_alignment_detection are disabled if set.
+    # Set to 0 for the default alignment (see: data_alignment_default)
+    # or page size, if larger.
     data_alignment = 0
 
     # By default, the start of the PV's aligned data area will be shifted by
@@ -122,6 +146,7 @@ devices {
     # windows partitioning will have an alignment_offset of 3584 bytes
     # (sector 7 is the lowest aligned logical block, the 4KB sectors start
     # at LBA -1, and consequently sector 63 is aligned on a 4KB boundary).
+    # But note that pvcreate --dataalignmentoffset will skip this detection.
     # 1 enables; 0 disables.
     data_alignment_offset_detection = 1
 
@@ -130,7 +155,75 @@ devices {
     # Set this to 1 to skip such devices.  This should only be needed
     # in recovery situations.
     ignore_suspended_devices = 0
+
+    # During each LVM operation errors received from each device are counted.
+    # If the counter of a particular device exceeds the limit set here, no
+    # further I/O is sent to that device for the remainder of the respective
+    # operation. Setting the parameter to 0 disables the counters altogether.
+    disable_after_error_count = 0
+
+    # Allow use of pvcreate --uuid without requiring --restorefile.
+    require_restorefile_with_uuid = 1
+
+    # Minimum size (in KB) of block devices which can be used as PVs.
+    # In a clustered environment all nodes must use the same value.
+    # Any value smaller than 512KB is ignored.
+
+    # Ignore devices smaller than 2MB such as floppy drives.
+    pv_min_size = 2048
+
+    # The original built-in setting was 512 up to and including version 2.02.84.
+    # pv_min_size = 512
+
+    # Issue discards to a logical volumes's underlying physical volume(s) when
+    # the logical volume is no longer using the physical volumes' space (e.g.
+    # lvremove, lvreduce, etc).  Discards inform the storage that a region is
+    # no longer in use.  Storage that supports discards advertise the protocol
+    # specific way discards should be issued by the kernel (TRIM, UNMAP, or
+    # WRITE SAME with UNMAP bit set).  Not all storage will support or benefit
+    # from discards but SSDs and thinly provisioned LUNs generally do.  If set
+    # to 1, discards will only be issued if both the storage and kernel provide
+    # support.
+    # 1 enables; 0 disables.
+    issue_discards = 0
 }
+
+# This section allows you to configure the way in which LVM selects
+# free space for its Logical Volumes.
+#allocation {
+#    When searching for free space to extend an LV, the "cling"
+#    allocation policy will choose space on the same PVs as the last
+#    segment of the existing LV.  If there is insufficient space and a
+#    list of tags is defined here, it will check whether any of them are
+#    attached to the PVs concerned and then seek to match those PV tags
+#    between existing extents and new extents.
+#    Use the special tag "@*" as a wildcard to match any PV tag.
+#    
+#    Example: LVs are mirrored between two sites within a single VG.
+#    PVs are tagged with either @site1 or @site2 to indicate where
+#    they are situated.
+#
+#    cling_tag_list = [ "@site1", "@site2" ]
+#    cling_tag_list = [ "@*" ]
+#
+#    Changes made in version 2.02.85 extended the reach of the 'cling'
+#    policies to detect more situations where data can be grouped
+#    onto the same disks.  Set this to 0 to revert to the previous
+#    algorithm.
+#
+#    maximise_cling = 1
+#
+#    Set to 1 to guarantee that mirror logs will always be placed on 
+#    different PVs from the mirror images.  This was the default
+#    until version 2.02.85.
+#
+#    mirror_logs_require_separate_pvs = 0
+#
+#    Set to 1 to guarantee that thin pool metadata will always
+#    be placed on different PVs from the pool data.
+#
+#    thin_pool_metadata_require_separate_pvs = 0
+#}
 
 # This section that allows you to configure the nature of the
 # information that LVM2 reports.
@@ -320,9 +413,65 @@ global {
     # Treat any internal errors as fatal errors, aborting the process that
     # encountered the internal error. Please only enable for debugging.
     abort_on_internal_errors = 0
+
+    # Check whether CRC is matching when parsed VG is used multiple times.
+    # This is useful to catch unexpected internal cached volume group
+    # structure modification. Please only enable for debugging.
+    detect_internal_vg_cache_corruption = 0
+
+    # If set to 1, no operations that change on-disk metadata will be permitted.
+    # Additionally, read-only commands that encounter metadata in need of repair
+    # will still be allowed to proceed exactly as if the repair had been 
+    # performed (except for the unchanged vg_seqno).
+    # Inappropriate use could mess up your system, so seek advice first!
+    metadata_read_only = 0
+
+    # 'mirror_segtype_default' defines which segtype will be used when the
+    # shorthand '-m' option is used for mirroring.  The possible options are:
+    #
+    # "mirror" - The original RAID1 implementation provided by LVM2/DM.  It is
+    # 	         characterized by a flexible log solution (core, disk, mirrored)
+    #		 and by the necessity to block I/O while reconfiguring in the
+    #		 event of a failure.  Snapshots of this type of RAID1 can be
+    #		 problematic.
+    #
+    # "raid1"  - This implementation leverages MD's RAID1 personality through
+    # 	       	 device-mapper.  It is characterized by a lack of log options.
+    #		 (A log is always allocated for every device and they are placed
+    #		 on the same device as the image - no separate devices are
+    #		 required.)  This mirror implementation does not require I/O
+    #		 to be blocked in the kernel in the event of a failure.
+    #
+    # Specify the '--type <mirror|raid1>' option to override this default
+    # setting.
+    mirror_segtype_default = "mirror"
+
+    # The default format for displaying LV names in lvdisplay was changed 
+    # in version 2.02.89 to show the LV name and path separately.
+    # Previously this was always shown as /dev/vgname/lvname even when that
+    # was never a valid path in the /dev filesystem.
+    # Set to 1 to reinstate the previous format.
+    #
+    # lvdisplay_shows_full_device_path = 0
+
+    # Whether to use (trust) a running instance of lvmetad. If this is set to
+    # 0, all commands fall back to the usual scanning mechanisms. When set to 1
+    # *and* when lvmetad is running (it is not auto-started), the volume group
+    # metadata and PV state flags are obtained from the lvmetad instance and no
+    # scanning is done by the individual commands. In a setup with lvmetad,
+    # lvmetad udev rules *must* be set up for LVM to work correctly. Without
+    # proper udev rules, all changes in block device configuration will be
+    # *ignored* until a manual 'vgscan' is performed.
+    use_lvmetad = 0
 }
 
 activation {
+    # Set to 1 to perform internal checks on the operations issued to
+    # libdevmapper.  Useful for debugging problems with activation.
+    # Some of the checks may be expensive, so it's best to use this
+    # only when there seems to be a problem.
+    checks = 0
+
     # Set to 0 to disable udev synchronisation (if compiled into the binaries).
     # Processes will not wait for notification from udev.
     # They will continue irrespective of any possible udev processing
@@ -340,6 +489,17 @@ activation {
     # while any logical volumes are active.
     udev_rules = 1
 
+    # Set to 1 for LVM2 to verify operations performed by udev. This turns on
+    # additional checks (and if necessary, repairs) on entries in the device
+    # directory after udev has completed processing its events. 
+    # Useful for diagnosing problems with LVM2/udev interactions.
+    verify_udev_operations = 0
+
+    # If set to 1 and if deactivation of an LV fails, perhaps because
+    # a process run from a quick udev rule temporarily opened the device,
+    # retry the operation for a few seconds before failing.
+    retry_deactivation = 1
+
     # How to fill in missing stripes if activating an incomplete volume.
     # Using "error" will make inaccessible parts of the device return
     # I/O errors on access.  You can instead use a device path, in which 
@@ -348,8 +508,14 @@ activation {
     # or snapshotted volumes is likely to result in data corruption.
     missing_stripe_filler = "error"
 
+    # The linear target is an optimised version of the striped target
+    # that only handles a single stripe.  Set this to 0 to disable this
+    # optimisation and always use the striped target.
+    use_linear_target = 1
+
     # How much stack (in KB) to reserve for use while devices suspended
-    reserved_stack = 256
+    # Prior to version 2.02.89 this used to be set to 256KB
+    reserved_stack = 64
 
     # How much memory (in KB) to reserve for use while devices suspended
     reserved_memory = 8192
@@ -365,6 +531,16 @@ activation {
     #
     # volume_list = [ "vg1", "vg2/lvol1", "@tag1", "@*" ]
 
+    # If read_only_volume_list is defined, each LV that is to be activated 
+    # is checked against the list, and if it matches, it as activated
+    # in read-only mode.  (This overrides '--permission rw' stored in the
+    # metadata.)
+    #   "vgname" and "vgname/lvname" are matched exactly.
+    #   "@tag" matches any tag set in the LV or VG.
+    #   "@*" matches if any tag defined on the host is also set in the LV or VG
+    #
+    # read_only_volume_list = [ "vg1", "vg2/lvol1", "@tag1", "@*" ]
+
     # Size (in KB) of each copy operation when mirroring
     mirror_region_size = 512
 
@@ -374,9 +550,31 @@ activation {
     # "auto" - Use default value chosen by kernel.
     readahead = "auto"
 
+    # 'raid_fault_policy' defines how a device failure in a RAID logical
+    # volume is handled.  This includes logical volumes that have the following
+    # segment types: raid1, raid4, raid5*, and raid6*.
+    #
+    # In the event of a failure, the following policies will determine what
+    # actions are performed during the automated response to failures (when
+    # dmeventd is monitoring the RAID logical volume) and when 'lvconvert' is
+    # called manually with the options '--repair' and '--use-policies'.
+    #
+    # "warn"	- Use the system log to warn the user that a device in the RAID
+    # 		  logical volume has failed.  It is left to the user to run
+    #		  'lvconvert --repair' manually to remove or replace the failed
+    #		  device.  As long as the number of failed devices does not
+    #		  exceed the redundancy of the logical volume (1 device for
+    #		  raid4/5, 2 for raid6, etc) the logical volume will remain
+    #		  usable.
+    #
+    # "allocate" - Attempt to use any extra physical volumes in the volume
+    # 		  group as spares and replace faulty devices.
+    #
+    raid_fault_policy = "warn"
+
     # 'mirror_image_fault_policy' and 'mirror_log_fault_policy' define
-    # how a device failure affecting a mirror is handled.
-    # A mirror is composed of mirror images (copies) and a log.
+    # how a device failure affecting a mirror (of "mirror" segment type) is
+    # handled.  A mirror is composed of mirror images (copies) and a log.
     # A disk log ensures that a mirror does not need to be re-synced
     # (all copies made the same) every time a machine reboots or crashes.
     #
@@ -413,6 +611,54 @@ activation {
 
     mirror_log_fault_policy = "allocate"
     mirror_image_fault_policy = "remove"
+
+    # 'snapshot_autoextend_threshold' and 'snapshot_autoextend_percent' define
+    # how to handle automatic snapshot extension. The former defines when the
+    # snapshot should be extended: when its space usage exceeds this many
+    # percent. The latter defines how much extra space should be allocated for
+    # the snapshot, in percent of its current size.
+    #
+    # For example, if you set snapshot_autoextend_threshold to 70 and
+    # snapshot_autoextend_percent to 20, whenever a snapshot exceeds 70% usage,
+    # it will be extended by another 20%. For a 1G snapshot, using up 700M will
+    # trigger a resize to 1.2G. When the usage exceeds 840M, the snapshot will
+    # be extended to 1.44G, and so on.
+    #
+    # Setting snapshot_autoextend_threshold to 100 disables automatic
+    # extensions. The minimum value is 50 (A setting below 50 will be treated
+    # as 50).
+
+    snapshot_autoextend_threshold = 100
+    snapshot_autoextend_percent = 20
+
+    # 'thin_pool_autoextend_threshold' and 'thin_pool_autoextend_percent' define
+    # how to handle automatic pool extension. The former defines when the
+    # pool should be extended: when its space usage exceeds this many
+    # percent. The latter defines how much extra space should be allocated for
+    # the pool, in percent of its current size.
+    #
+    # For example, if you set thin_pool_autoextend_threshold to 70 and
+    # thin_pool_autoextend_percent to 20, whenever a pool exceeds 70% usage,
+    # it will be extended by another 20%. For a 1G pool, using up 700M will
+    # trigger a resize to 1.2G. When the usage exceeds 840M, the pool will
+    # be extended to 1.44G, and so on.
+    #
+    # Setting thin_pool_autoextend_threshold to 100 disables automatic
+    # extensions. The minimum value is 50 (A setting below 50 will be treated
+    # as 50).
+
+    thin_pool_autoextend_threshold = 100
+    thin_pool_autoextend_percent = 20
+
+    # Full path of the utility called to check that a thin metadata device
+    # is in a state that allows it to be used.
+    # Each time a thin pool needs to be activated, this utility is executed.
+    # The activation will only proceed if the utility has an exit status of 0.
+    # Set to "" to skip this check.  (Not recommended.)
+    # The thin tools are available as part of the device-mapper-persistent-data
+    # package from https://github.com/jthornber/thin-provisioning-tools.
+    #
+    thin_check_executable = "/sbin/thin_check -q"
 
     # While activating devices, I/O to devices being (re)configured is
     # suspended, and as a precaution against deadlocks, LVM2 needs to pin
@@ -456,6 +702,19 @@ activation {
 
     # pvmetadatacopies = 1
 
+    # Default number of copies of metadata to maintain for each VG.
+    # If set to a non-zero value, LVM automatically chooses which of
+    # the available metadata areas to use to achieve the requested
+    # number of copies of the VG metadata.  If you set a value larger
+    # than the the total number of metadata areas available then
+    # metadata is stored in them all.
+    # The default value of 0 ("unmanaged") disables this automatic
+    # management and allows you to control which metadata areas
+    # are used at the individual PV level using 'pvchange
+    # --metadataignore y/n'.
+
+    # vgmetadatacopies = 0
+
     # Approximate default size of on-disk metadata areas in sectors.
     # You should increase this if you have large volume groups or
     # you want to retain a large on-disk history of your metadata changes.
@@ -493,9 +752,22 @@ dmeventd {
     # snapshot_library is the library used when monitoring a snapshot device.
     #
     # "libdevmapper-event-lvm2snapshot.so" monitors the filling of
-    # snapshots and emits a warning through syslog, when the use of
-    # snapshot exceedes 80%. The warning is repeated when 85%, 90% and
-    # 95% of the snapshot are filled.
+    # snapshots and emits a warning through syslog when the use of
+    # the snapshot exceeds 80%. The warning is repeated when 85%, 90% and
+    # 95% of the snapshot is filled.
 
     snapshot_library = "libdevmapper-event-lvm2snapshot.so"
+
+    # thin_library is the library used when monitoring a thin device.
+    #
+    # "libdevmapper-event-lvm2thin.so" monitors the filling of
+    # pool and emits a warning through syslog when the use of
+    # the pool exceeds 80%. The warning is repeated when 85%, 90% and
+    # 95% of the pool is filled.
+
+    thin_library = "libdevmapper-event-lvm2thin.so"
+
+    # Full path of the dmeventd binary.
+    #
+    # executable = "@DMEVENTD_PATH@"
 }

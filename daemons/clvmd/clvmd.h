@@ -20,9 +20,6 @@
 #define CLVMD_MINOR_VERSION 2
 #define CLVMD_PATCH_VERSION 1
 
-/* Name of the cluster LVM admin lock */
-#define ADMIN_LOCK_NAME "CLVMD_ADMIN"
-
 /* Default time (in seconds) we will wait for all remote commands to execute
    before declaring them dead */
 #define DEFAULT_CMD_TIMEOUT 60
@@ -115,10 +112,13 @@ extern void cmd_client_cleanup(struct local_client *client);
 extern int add_client(struct local_client *new_client);
 
 extern void clvmd_cluster_init_completed(void);
-extern void process_message(struct local_client *client, const char *buf,
+extern void process_message(struct local_client *client, char *buf,
 			    int len, const char *csid);
 extern void debuglog(const char *fmt, ... )
   __attribute__ ((format(printf, 1, 2)));
+
+void clvmd_set_debug(debug_t new_de);
+debug_t clvmd_get_debug(void);
 
 int sync_lock(const char *resource, int mode, int flags, int *lockid);
 int sync_unlock(const char *resource, int lockid);

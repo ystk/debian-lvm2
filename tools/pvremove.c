@@ -25,15 +25,12 @@ const char _really_wipe[] =
 static int pvremove_check(struct cmd_context *cmd, const char *name)
 {
 	struct physical_volume *pv;
-	struct dm_list mdas;
-
-	dm_list_init(&mdas);
 
 	/* FIXME Check partition type is LVM unless --force is given */
 
 	/* Is there a pv here already? */
 	/* If not, this is an error unless you used -f. */
-	if (!(pv = pv_read(cmd, name, &mdas, NULL, 1, 0))) {
+	if (!(pv = pv_read(cmd, name, 1, 0))) {
 		if (arg_count(cmd, force_ARG))
 			return 1;
 		log_error("Physical Volume %s not found", name);
@@ -47,35 +44,39 @@ static int pvremove_check(struct cmd_context *cmd, const char *name)
 	 * means checking every VG by scanning every
 	 * PV on the system.
 	 */
-	if (is_orphan(pv) && !dm_list_size(&mdas)) {
-		if (!scan_vgs_for_pvs(cmd)) {
+	if (is_orphan(pv) && !dm_list_size(&pv->fid->metadata_areas_in_use) &&
+	    !dm_list_size(&pv->fid->metadata_areas_ignored)) {
+		if (!scan_vgs_for_pvs(cmd, 0)) {
 			log_error("Rescan for PVs without metadata areas "
 				  "failed.");
-			return 0;
+			goto bad;
 		}
-		if (!(pv = pv_read(cmd, name, NULL, NULL, 1, 0))) {
+		free_pv_fid(pv);
+		if (!(pv = pv_read(cmd, name, 1, 0))) {
 			log_error("Failed to read physical volume %s", name);
-			return 0;
+			goto bad;
 		}
 	}
 
 	/* orphan ? */
-	if (is_orphan(pv))
+	if (is_orphan(pv)) {
+		free_pv_fid(pv);
 		return 1;
+	}
 
 	/* Allow partial & exported VGs to be destroyed. */
 	/* we must have -ff to overwrite a non orphan */
 	if (arg_count(cmd, force_ARG) < 2) {
-		log_error("Can't pvremove physical volume \"%s\" of "
-			  "volume group \"%s\" without -ff", name, pv_vg_name(pv));
-		return 0;
+		log_error("PV %s belongs to Volume Group %s so please use vgreduce first.", name, pv_vg_name(pv));
+		log_error("(If you are certain you need pvremove, then confirm by using --force twice.)");
+		goto bad;
 	}
 
 	/* prompt */
 	if (!arg_count(cmd, yes_ARG) &&
 	    yes_no_prompt(_really_wipe, name, pv_vg_name(pv)) == 'n') {
 		log_error("%s: physical volume label not removed", name);
-		return 0;
+		goto bad;
 	}
 
 	if (arg_count(cmd, force_ARG)) {
@@ -86,11 +87,16 @@ static int pvremove_check(struct cmd_context *cmd, const char *name)
 			  !is_orphan(pv) ? "\"" : "");
 	}
 
+	free_pv_fid(pv);
 	return 1;
+
+bad:
+	free_pv_fid(pv);
+	return 0;
 }
 
 static int pvremove_single(struct cmd_context *cmd, const char *pv_name,
-			   void *handle __attribute((unused)))
+			   void *handle __attribute__((unused)))
 {
 	struct device *dev;
 	int ret = ECMD_FAILED;
@@ -101,33 +107,36 @@ static int pvremove_single(struct cmd_context *cmd, const char *pv_name,
 	}
 
 	if (!pvremove_check(cmd, pv_name))
-		goto error;
+		goto out;
 
 	if (!(dev = dev_cache_get(pv_name, cmd->filter))) {
 		log_error("%s: Couldn't find device.  Check your filters?",
 			  pv_name);
-		goto error;
+		goto out;
 	}
 
 	if (!dev_test_excl(dev)) {
 		/* FIXME Detect whether device-mapper is still using the device */
 		log_error("Can't open %s exclusively - not removing. "
 			  "Mounted filesystem?", dev_name(dev));
-		goto error;
+		goto out;
 	}
 
 	/* Wipe existing label(s) */
 	if (!label_remove(dev)) {
 		log_error("Failed to wipe existing label(s) on %s", pv_name);
-		goto error;
+		goto out;
 	}
+
+	if (!lvmetad_pv_gone_by_dev(dev))
+		goto_out;
 
 	log_print("Labels on physical volume \"%s\" successfully wiped",
 		  pv_name);
 
 	ret = ECMD_PROCESSED;
 
-      error:
+out:
 	unlock_vg(cmd, VG_ORPHANS);
 
 	return ret;
@@ -143,12 +152,8 @@ int pvremove(struct cmd_context *cmd, int argc, char **argv)
 		return EINVALID_CMD_LINE;
 	}
 
-	if (arg_count(cmd, yes_ARG) && !arg_count(cmd, force_ARG)) {
-		log_error("Option y can only be given with option f");
-		return EINVALID_CMD_LINE;
-	}
-
 	for (i = 0; i < argc; i++) {
+		dm_unescape_colons_and_at_signs(argv[i], NULL, NULL);
 		r = pvremove_single(cmd, argv[i], NULL);
 		if (r > ret)
 			ret = r;

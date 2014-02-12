@@ -24,6 +24,7 @@ int vgcreate(struct cmd_context *cmd, int argc, char **argv)
 	const char *clustered_message = "";
 	char *vg_name;
 	struct pvcreate_params pp;
+	struct arg_value_group_list *current_group;
 
 	if (!argc) {
 		log_error("Please provide volume group name and "
@@ -35,11 +36,6 @@ int vgcreate(struct cmd_context *cmd, int argc, char **argv)
 	argc--;
 	argv++;
 
-	if (arg_count(cmd, metadatacopies_ARG)) {
-		log_error("Invalid option --metadatacopies, "
-			  "use --pvmetadatacopies instead.");
-		return EINVALID_CMD_LINE;
-	}
 	pvcreate_params_set_defaults(&pp);
 	if (!pvcreate_params_validate(cmd, argc, argv, &pp)) {
 		return EINVALID_CMD_LINE;
@@ -53,6 +49,8 @@ int vgcreate(struct cmd_context *cmd, int argc, char **argv)
 	if (vgcreate_params_validate(cmd, &vp_new))
 	    return EINVALID_CMD_LINE;
 
+	lvmcache_seed_infos_from_lvmetad(cmd);
+
 	/* Create the new VG */
 	vg = vg_create(cmd, vp_new.vg_name);
 	if (vg_read_error(vg)) {
@@ -60,7 +58,7 @@ int vgcreate(struct cmd_context *cmd, int argc, char **argv)
 			log_error("A volume group called %s already exists.", vp_new.vg_name);
 		else
 			log_error("Can't get lock for %s.", vp_new.vg_name);
-		vg_release(vg);
+		release_vg(vg);
 		return ECMD_FAILED;
 	}
 
@@ -68,7 +66,8 @@ int vgcreate(struct cmd_context *cmd, int argc, char **argv)
 	    !vg_set_max_lv(vg, vp_new.max_lv) ||
 	    !vg_set_max_pv(vg, vp_new.max_pv) ||
 	    !vg_set_alloc_policy(vg, vp_new.alloc) ||
-	    !vg_set_clustered(vg, vp_new.clustered))
+	    !vg_set_clustered(vg, vp_new.clustered) ||
+	    !vg_set_mda_copies(vg, vp_new.vgmetadatacopies))
 		goto bad_orphan;
 
 	if (!lock_vol(cmd, VG_ORPHANS, LCK_VG_WRITE)) {
@@ -77,7 +76,7 @@ int vgcreate(struct cmd_context *cmd, int argc, char **argv)
 	}
 
 	/* attach the pv's */
-	if (!vg_extend(vg, argc, argv, &pp))
+	if (!vg_extend(vg, argc, (const char* const*)argv, &pp))
 		goto_bad;
 
 	if (vp_new.max_lv != vg->max_lv)
@@ -89,21 +88,24 @@ int vgcreate(struct cmd_context *cmd, int argc, char **argv)
 			 "(0 means unlimited)", vg->max_pv);
 
 	if (arg_count(cmd, addtag_ARG)) {
-		if (!(tag = arg_str_value(cmd, addtag_ARG, NULL))) {
-			log_error("Failed to get tag");
-			goto bad;
+		dm_list_iterate_items(current_group, &cmd->arg_value_groups) {
+			if (!grouped_arg_is_set(current_group->arg_values, addtag_ARG))
+				continue;
+
+			if (!(tag = grouped_arg_str_value(current_group->arg_values, addtag_ARG, NULL))) {
+				log_error("Failed to get tag");
+				goto bad;
+			}
+
+			if (!vg_change_tag(vg, tag, 1))
+				goto_bad;
 		}
-
-		if (!vg_change_tag(vg, tag, 1))
-			goto_bad;
 	}
 
-	if (vg_is_clustered(vg)) {
+	if (vg_is_clustered(vg))
 		clustered_message = "Clustered ";
-	} else {
-		if (locking_is_clustered())
-			clustered_message = "Non-clustered ";
-	}
+	else if (locking_is_clustered())
+		clustered_message = "Non-clustered ";
 
 	if (!archive(vg))
 		goto_bad;
@@ -120,13 +122,13 @@ int vgcreate(struct cmd_context *cmd, int argc, char **argv)
 	log_print("%s%colume group \"%s\" successfully created",
 		  clustered_message, *clustered_message ? 'v' : 'V', vg->name);
 
-	vg_release(vg);
+	release_vg(vg);
 	return ECMD_PROCESSED;
 
 bad:
 	unlock_vg(cmd, VG_ORPHANS);
 bad_orphan:
-	vg_release(vg);
+	release_vg(vg);
 	unlock_vg(cmd, vp_new.vg_name);
 	return ECMD_FAILED;
 }
