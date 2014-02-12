@@ -2,8 +2,10 @@
 #
 ### BEGIN INIT INFO
 # Provides:          clvm
-# Required-Start:    $remote_fs lvm2 cman
-# Required-Stop:     $remote_fs lvm2 cman
+# Required-Start:    lvm2
+# Required-Stop:     lvm2
+# Should-Start:      cman corosync openais
+# Should-Stop:       cman corosync openais
 # Default-Start:     S
 # Default-Stop:      0 6
 # Short-Description: start and stop the lvm cluster locking daemon

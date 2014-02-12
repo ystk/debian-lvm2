@@ -1,9 +1,12 @@
-upstream-define-union-semun.patch
-upstream-2.02.72.patch
 install.patch
 libs-cleanup.patch
-config.patch
+dirs.patch
 force-modprobe.patch
-libdm-atomic.patch
-rules-subdir.patch
+#libdm-atomic.patch
 implicit-pointer.patch
+dm-event-api.patch
+monitoring-default-off.patch
+upstream-fix-discard-1.patch
+upstream-fix-discard-2.patch
+upstream-fix-discard-3.patch
+missing-dmeventd.patch

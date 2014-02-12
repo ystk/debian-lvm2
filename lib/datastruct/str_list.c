@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2003-2004 Sistina Software, Inc. All rights reserved.
- * Copyright (C) 2004-2005 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2004-2012 Red Hat, Inc. All rights reserved.
  *
  * This file is part of LVM2.
  *
@@ -50,16 +50,13 @@ int str_list_add(struct dm_pool *mem, struct dm_list *sll, const char *str)
 	return 1;
 }
 
-int str_list_del(struct dm_list *sll, const char *str)
+void str_list_del(struct dm_list *sll, const char *str)
 {
 	struct dm_list *slh, *slht;
 
-	dm_list_iterate_safe(slh, slht, sll) {
+	dm_list_iterate_safe(slh, slht, sll)
 		if (!strcmp(str, dm_list_item(slh, struct str_list)->str))
 			 dm_list_del(slh);
-	}
-
-	return 1;
 }
 
 int str_list_dup(struct dm_pool *mem, struct dm_list *sllnew,
@@ -93,14 +90,18 @@ int str_list_match_item(const struct dm_list *sll, const char *str)
 
 /*
  * Is at least one item on both lists?
+ * If tag_matched is non-NULL, it is set to the tag that matched.
  */
-int str_list_match_list(const struct dm_list *sll, const struct dm_list *sll2)
+int str_list_match_list(const struct dm_list *sll, const struct dm_list *sll2, const char **tag_matched)
 {
 	struct str_list *sl;
 
 	dm_list_iterate_items(sl, sll)
-	    if (str_list_match_item(sll2, sl->str))
-		return 1;
+		if (str_list_match_item(sll2, sl->str)) {
+			if (tag_matched)
+				*tag_matched = sl->str;
+			return 1;
+		}
 
 	return 0;
 }

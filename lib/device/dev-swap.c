@@ -42,14 +42,15 @@ int dev_is_swap(struct device *dev, uint64_t *signature)
 {
 	char buf[10];
 	uint64_t size;
-	int page;
+	unsigned page;
+	int ret = 0;
 
 	if (!dev_get_size(dev, &size)) {
 		stack;
 		return -1;
 	}
 
-	if (!dev_open(dev)) {
+	if (!dev_open_readonly(dev)) {
 		stack;
 		return -1;
 	}
@@ -66,11 +67,12 @@ int dev_is_swap(struct device *dev, uint64_t *signature)
 			break;
 		if (!dev_read(dev, page - SIGNATURE_SIZE,
 			      SIGNATURE_SIZE, buf)) {
-			stack;
-			return -1;
+			ret = -1;
+			break;
 		}
 		if (_swap_detect_signature(buf)) {
 			*signature = page - SIGNATURE_SIZE;
+			ret = 1;
 			break;
 		}
 	}
@@ -78,10 +80,7 @@ int dev_is_swap(struct device *dev, uint64_t *signature)
 	if (!dev_close(dev))
 		stack;
 
-	if (*signature)
-		return 1;
-
-	return 0;
+	return ret;
 }
 
 #endif

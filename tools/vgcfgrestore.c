@@ -17,7 +17,7 @@
 
 int vgcfgrestore(struct cmd_context *cmd, int argc, char **argv)
 {
-	char *vg_name = NULL;
+	const char *vg_name = NULL;
 
 	if (argc == 1) {
 		vg_name = skip_dev_dir(cmd, argv[0], NULL);
@@ -44,6 +44,8 @@ int vgcfgrestore(struct cmd_context *cmd, int argc, char **argv)
 		}
 		return ECMD_PROCESSED;
 	}
+
+	lvmcache_seed_infos_from_lvmetad(cmd);
 
 	if (!lock_vol(cmd, vg_name, LCK_VG_WRITE)) {
 		log_error("Unable to lock volume group %s", vg_name);

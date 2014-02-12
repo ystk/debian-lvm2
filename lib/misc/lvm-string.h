@@ -27,37 +27,13 @@ struct pool;
 int emit_to_buffer(char **buffer, size_t *size, const char *fmt, ...)
   __attribute__ ((format(printf, 3, 4)));
 
-char *build_dm_name(struct dm_pool *mem, const char *vg,
-                    const char *lv, const char *layer);
 char *build_dm_uuid(struct dm_pool *mem, const char *lvid,
 		    const char *layer);
 
 int validate_name(const char *n);
+int validate_tag(const char *n);
 
 int apply_lvname_restrictions(const char *name);
 int is_reserved_lvname(const char *name);
-
-/*
- * Returns number of occurrences of c in first len characters of str.
- */
-unsigned count_chars(const char *str, size_t len, const int c);
-
-/*
- * Returns what length of escaped string would be including terminating NUL.
- */
-size_t escaped_len(const char *str);
-
-/*
- * Copies a string from src to out. 
- * Double quotation marks and backslashes are quoted with a backslash.
- * Caller must ensure *out has enough space - see escaped_len().
- * Returns *out.
- */
-char *escape_double_quotes(char *out, const char *src);
-
-/*
- * Removes quoting of double quotation marks and backslashes in situ.
- */
-void unescape_double_quotes(char *src);
 
 #endif

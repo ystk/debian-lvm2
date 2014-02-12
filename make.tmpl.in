@@ -1,7 +1,7 @@
 # @configure_input@
 #
 # Copyright (C) 2001-2004 Sistina Software, Inc. All rights reserved.
-# Copyright (C) 2004-2009 Red Hat, Inc. All rights reserved.
+# Copyright (C) 2004-2011 Red Hat, Inc. All rights reserved.
 #
 # This file is part of LVM2.
 #
@@ -17,9 +17,8 @@ SHELL = /bin/sh
 
 @SET_MAKE@
 
-CC = @CC@
+CC ?= @CC@
 RANLIB = @RANLIB@
-SHELL = /bin/sh
 INSTALL = @INSTALL@
 MKDIR_P = @MKDIR_P@
 MSGFMT = @MSGFMT@
@@ -36,20 +35,23 @@ STATIC_LIBS = $(SELINUX_LIBS) $(UDEV_LIBS)
 DEFS += @DEFS@
 CFLAGS += @CFLAGS@
 CLDFLAGS += @CLDFLAGS@
+ELDFLAGS += @ELDFLAGS@
 LDDEPS += @LDDEPS@
 LDFLAGS += @LDFLAGS@
 LIB_SUFFIX = @LIB_SUFFIX@
-LVMINTERNAL_LIBS = -llvm-internal $(DL_LIBS)
+LVMINTERNAL_LIBS = -llvm-internal $(DAEMON_LIBS) $(UDEV_LIBS) $(DL_LIBS)
 DL_LIBS = @DL_LIBS@
 PTHREAD_LIBS = @PTHREAD_LIBS@
 READLINE_LIBS = @READLINE_LIBS@
 SELINUX_LIBS = @SELINUX_LIBS@
 UDEV_LIBS = @UDEV_LIBS@
+TESTING = @TESTING@
 
 # Setup directory variables
 prefix = @prefix@
 exec_prefix = @exec_prefix@
 udev_prefix = @udev_prefix@
+sysconfdir = @sysconfdir@
 bindir = $(DESTDIR)@bindir@
 confdir = $(DESTDIR)@CONFDIR@/lvm
 includedir = $(DESTDIR)@includedir@
@@ -57,13 +59,18 @@ libdir = $(DESTDIR)@libdir@
 usrlibdir = $(DESTDIR)@usrlibdir@
 sbindir = $(DESTDIR)@sbindir@
 usrsbindir = $(DESTDIR)@usrsbindir@
-datarootdir = $(DESTDIR)@datarootdir@
-infodir = $(datarootdir)/info
-mandir = $(datarootdir)/man
+datarootdir = @datarootdir@
+infodir = $(DESTDIR)@infodir@
+mandir = $(DESTDIR)@mandir@
 localedir = $(DESTDIR)@LOCALEDIR@
 staticdir = $(DESTDIR)@STATICDIR@
 udevdir = $(DESTDIR)@udevdir@
 pkgconfigdir = $(usrlibdir)/pkgconfig
+initdir = $(DESTDIR)$(sysconfdir)/rc.d/init.d
+systemd_dir = $(DESTDIR)@systemdsystemunitdir@
+tmpfiles_dir = $(DESTDIR)@tmpfilesdir@
+ocf_scriptdir = $(DESTDIR)@OCFDIR@
+
 USRLIB_RELPATH = $(shell echo $(abspath $(usrlibdir) $(libdir)) | \
   $(AWK) -f $(top_srcdir)/scripts/relpath.awk)
 
@@ -72,6 +79,7 @@ DEFAULT_ARCHIVE_DIR = $(DEFAULT_SYS_DIR)/@DEFAULT_ARCHIVE_SUBDIR@
 DEFAULT_BACKUP_DIR = $(DEFAULT_SYS_DIR)/@DEFAULT_BACKUP_SUBDIR@
 DEFAULT_CACHE_DIR = $(DEFAULT_SYS_DIR)/@DEFAULT_CACHE_SUBDIR@
 DEFAULT_LOCK_DIR = @DEFAULT_LOCK_DIR@
+DEFAULT_RUN_DIR = @DEFAULT_RUN_DIR@
 
 # Setup vpath search paths for some suffixes
 vpath %.c $(srcdir)
@@ -100,19 +108,24 @@ INSTALL_PROGRAM = $(INSTALL) $(M_INSTALL_PROGRAM) $(STRIP)
 INSTALL_DATA = $(INSTALL) -p $(M_INSTALL_DATA)
 INSTALL_WDATA = $(INSTALL) -p -m 644
 
-INSTALL_DIR = $(INSTALL) -m 0755 -d
-INSTALL_ROOT_DIR = $(INSTALL) -m 0700 -d
-INSTALL_ROOT_DATA = $(INSTALL) -m 0600
+INSTALL_DIR = $(INSTALL) -m 755 -d
+INSTALL_ROOT_DIR = $(INSTALL) -m 700 -d
+INSTALL_ROOT_DATA = $(INSTALL) -m 600
 INSTALL_SCRIPT = $(INSTALL) -p $(M_INSTALL_PROGRAM)
 
 .SUFFIXES: .c .d .o .so .a .po .pot .mo .dylib
 
-CFLAGS += -fPIC -Wall -Wundef -Wshadow -Wcast-align -Wwrite-strings -Wmissing-prototypes -Wmissing-declarations -Wnested-externs -Winline -Wmissing-noreturn -Wformat-security
+WFLAGS += -Wall -Wundef -Wshadow -Wcast-align -Wwrite-strings \
+ -Wmissing-prototypes -Wmissing-declarations -Wnested-externs \
+ -Winline -Wmissing-noreturn -Wformat-security -Wredundant-decls \
+ -Wpointer-arith
 
-#CFLAGS += -W -Wconversion -Wpointer-arith -Wredundant-decls -Wbad-function-cast -Wcast-qual
-#CFLAGS += -pedantic -std=gnu99
+#WFLAGS += -W -Wconversion -Wbad-function-cast -Wcast-qual
+#WFLAGS += -pedantic -std=gnu99
+#DEFS += -DDEBUG_CRC32
 
-CFLAGS += @COPTIMISE_FLAG@
+CFLAGS += -fPIC  @COPTIMISE_FLAG@
+LDFLAGS += @COPTIMISE_FLAG@
 
 ifeq ("@DEBUG@", "yes")
   CFLAGS += -g -fno-omit-frame-pointer
@@ -130,6 +143,12 @@ endif
 LDFLAGS += -L$(top_builddir)/libdm -L$(top_builddir)/lib
 CLDFLAGS += -L$(top_builddir)/libdm -L$(top_builddir)/lib
 
+ifeq ("@BUILD_LVMETAD@", "yes")
+  DAEMON_LIBS = -ldaemonclient
+  LDFLAGS += -L$(top_builddir)/libdaemon/client
+  CLDFLAGS += -L$(top_builddir)/libdaemon/client
+endif
+
 ifeq ("@DMEVENTD@", "yes")
   LDFLAGS += -L$(top_builddir)/daemons/dmeventd
   CLDFLAGS += -L$(top_builddir)/daemons/dmeventd
@@ -143,7 +162,11 @@ ifeq ("@DM_IOCTLS@", "yes")
   DEFS += -DDM_IOCTLS
 endif
 
+# Combination of DEBUG_POOL and DEBUG_ENFORCE_POOL_LOCKING is not suppored.
 #DEFS += -DDEBUG_POOL
+# Default pool locking is using the crc checksum. With mprotect memory
+# enforcing compilation faulty memory write could be easily found.
+#DEFS += -DDEBUG_ENFORCE_POOL_LOCKING
 #DEFS += -DBOUNDS_CHECK
 
 #CFLAGS += -pg
@@ -173,6 +196,7 @@ POTFILES = $(SOURCES:%.c=%.pot)
 .PHONY: all pofile distclean clean cleandir cflow device-mapper
 .PHONY: install install_cluster install_device-mapper install_lvm2
 .PHONY: install_lib_shared install_dm_plugin install_lvm2_plugin
+.PHONY: install_ocf
 .PHONY: $(SUBDIRS) $(SUBDIRS.install) $(SUBDIRS.clean) $(SUBDIRS.distclean)
 .PHONY: $(SUBDIRS.pofile) $(SUBDIRS.install_cluster) $(SUBDIRS.cflow)
 .PHONY: $(SUBDIRS.device-mapper) $(SUBDIRS.install-device-mapper)
@@ -182,6 +206,7 @@ SUBDIRS.install := $(SUBDIRS:=.install)
 SUBDIRS.install_cluster := $(SUBDIRS:=.install_cluster)
 SUBDIRS.install_device-mapper := $(SUBDIRS:=.install_device-mapper)
 SUBDIRS.install_lvm2 := $(SUBDIRS:=.install_lvm2)
+SUBDIRS.install_ocf := $(SUBDIRS:=.install_ocf)
 SUBDIRS.pofile := $(SUBDIRS:=.pofile)
 SUBDIRS.cflow := $(SUBDIRS:=.cflow)
 SUBDIRS.clean := $(SUBDIRS:=.clean)
@@ -195,6 +220,7 @@ install: all $(SUBDIRS.install)
 install_cluster: all $(SUBDIRS.install_cluster)
 install_device-mapper: $(SUBDIRS.install_device-mapper)
 install_lvm2: $(SUBDIRS.install_lvm2)
+install_ocf: $(SUBDIRS.install_ocf)
 cflow: $(SUBDIRS.cflow)
 
 $(SUBDIRS): $(SUBDIRS.device-mapper)
@@ -214,6 +240,9 @@ $(SUBDIRS.install_device-mapper): device-mapper
 
 $(SUBDIRS.install_lvm2): $(SUBDIRS)
 	$(MAKE) -C $(@:.install_lvm2=) install_lvm2
+
+$(SUBDIRS.install_ocf):
+	$(MAKE) -C $(@:.install_ocf=) install_ocf
 
 $(SUBDIRS.clean):
 	-$(MAKE) -C $(@:.clean=) clean
@@ -285,14 +314,14 @@ endif
 $(TARGETS): $(OBJECTS)
 
 %.o: %.c
-	$(CC) -c $(INCLUDES) $(DEFS) $(CFLAGS) $< -o $@
+	$(CC) -c $(INCLUDES) $(DEFS) $(WFLAGS) $(CFLAGS) $< -o $@
 
 %.pot: %.c Makefile
 	$(CC) -E $(INCLUDES) -include $(top_srcdir)/include/pogen.h \
-		$(DEFS) $(CFLAGS) $< > $@
+		$(DEFS) $(WFLAGS) $(CFLAGS) $< > $@
 
 %.so: %.o
-	$(CC) -c $(INCLUDES) $(DEFS) $(CFLAGS) $(CLDFLAGS) $< $(LIBS) -o $@
+	$(CC) -c $(CFLAGS) $(CLDFLAGS) $< $(LIBS) -o $@
 
 ifneq (,$(LIB_SHARED))
 
@@ -312,7 +341,7 @@ $(LIB_SHARED): $(LIB_SHARED).$(LIB_VERSION)
 
 install_lib_shared: $(LIB_SHARED)
 	$(INSTALL_PROGRAM) -D $< $(libdir)/$(<F).$(LIB_VERSION)
-	$(INSTALL) -d $(usrlibdir)
+	$(INSTALL_DIR) $(usrlibdir)
 	$(LN_S) -f $(USRLIB_RELPATH)$(<F).$(LIB_VERSION) $(usrlibdir)/$(<F)
 
 # FIXME: plugins are installed to subdirs 
@@ -337,7 +366,7 @@ $(LIB_STATIC): $(OBJECTS)
 	set -e; \
 	FILE=`echo $@ | sed 's/\\//\\\\\\//g;s/\\.d//g'`; \
 	DEPS=`echo $(DEPS) | sed -e 's/\\//\\\\\\//g'`; \
-	$(CC) -MM $(INCLUDES) $(DEFS) $(CFLAGS) -o $@ $<; \
+	$(CC) -MM $(INCLUDES) $(DEFS) -o $@ $<; \
 	sed -i "s/\(.*\)\.o[ :]*/$$FILE.o $$FILE.d $$FILE.pot: $$DEPS /g" $@; \
 	[ -s $@ ] || $(RM) $@
 
@@ -347,15 +376,25 @@ $(LIB_STATIC): $(OBJECTS)
 cleandir:
 	$(RM) $(OBJECTS) $(TARGETS) $(CLEAN_TARGETS) $(CLEAN_CFLOW) $(LDDEPS) \
 	  $(POTFILES) $(SOURCES:%.c=%.d) $(SOURCES:%.c=%.gcno) $(SOURCES:%.c=%.gcda) \
-	  $(SOURCES2:%.c=%.o) $(SOURCES2:%.c=%.d) $(SOURCES2:%.c=%.gcno) $(SOURCES2:%.c=%.gcda)
+	  $(SOURCES2:%.c=%.o) $(SOURCES2:%.c=%.d) $(SOURCES2:%.c=%.gcno) $(SOURCES2:%.c=%.gcda) \
+	  .exported_symbols_generated core
 
 clean: $(SUBDIRS.clean) cleandir
 
 distclean: cleandir $(SUBDIRS.distclean)
 	test -z "$(DISTCLEAN_DIRS)" || $(RM) -r $(DISTCLEAN_DIRS)
-	$(RM) $(DISTCLEAN_TARGETS) Makefile core
+	$(RM) $(DISTCLEAN_TARGETS) Makefile 
 
-.export.sym: .exported_symbols
+.exported_symbols_generated: $(EXPORTED_HEADER) .exported_symbols
+	set -e; \
+	( cat $(srcdir)/.exported_symbols; \
+	  if test x$(EXPORTED_HEADER) != x; then \
+		$(CC) -E -P $(INCLUDES) $(DEFS) $(EXPORTED_HEADER) | \
+		$(SED) -ne "/^typedef|}/!s/.*[ \*]\(\$(EXPORTED_FN_PREFIX)_[a-z0-9_]*\)(.*/\1/p"; \
+	  fi \
+	) > $@
+
+.export.sym: .exported_symbols_generated
 	set -e; (echo "Base {"; echo "	global:"; \
 		 sed "s/^/		/;s/$$/;/" < $<; \
 		 echo "	local:"; echo "		*;"; echo "};") > $@

@@ -36,6 +36,7 @@ struct config_info {
 	int read_ahead;		/* DM_READ_AHEAD_NONE or _AUTO */
 	int udev_rules;
 	int udev_sync;
+	int udev_fallback;
 	int cache_vgmetadata;
 	const char *msg_prefix;
 	const char *fmt_name;
@@ -46,9 +47,15 @@ struct config_info {
 	char _padding[1];
 };
 
-struct config_tree;
+struct dm_config_tree;
 struct archive_params;
 struct backup_params;
+struct arg_values;
+
+struct config_tree_list {
+	struct dm_list list;
+	struct dm_config_tree *cft;
+};
 
 /* FIXME Split into tool & library contexts */
 /* command-instance-related variables needed by library */
@@ -65,22 +72,29 @@ struct cmd_context {
 	const char *kernel_vsn;
 
 	unsigned rand_seed;
+	char *linebuffer;
 	const char *cmd_line;
 	struct command *command;
 	char **argv;
+	struct arg_values *arg_values;
+	struct dm_list arg_value_groups;
 	unsigned is_long_lived:1;	/* Optimises persistent_filter handling */
 	unsigned handles_missing_pvs:1;
 	unsigned handles_unknown_segments:1;
+	unsigned use_linear_target:1;
 	unsigned partial_activation:1;
 	unsigned si_unit_consistency:1;
+	unsigned metadata_read_only:1;
+	unsigned threaded:1;		/* Set if running within a thread e.g. clvmd */
+
+	unsigned independent_metadata_areas:1;	/* Active formats have MDAs outside PVs */
 
 	struct dev_filter *filter;
 	int dump_filter;	/* Dump filter when exiting? */
 
 	struct dm_list config_files;
 	int config_valid;
-	struct config_tree *cft;
-	struct config_tree *cft_override;
+	struct dm_config_tree *cft;
 	struct config_info default_settings;
 	struct config_info current_settings;
 
@@ -95,7 +109,7 @@ struct cmd_context {
 	char system_dir[PATH_MAX];
 	char dev_dir[PATH_MAX];
 	char proc_dir[PATH_MAX];
-	char sysfs_dir[PATH_MAX];
+	char sysfs_dir[PATH_MAX]; /* FIXME Use global value instead. */
 };
 
 /*
@@ -103,7 +117,9 @@ struct cmd_context {
  * The environment variable LVM_SYSTEM_DIR always takes precedence.
  */
 struct cmd_context *create_toolcontext(unsigned is_long_lived,
-				       const char *system_dir);
+				       const char *system_dir,
+				       unsigned set_buffering,
+				       unsigned threaded);
 void destroy_toolcontext(struct cmd_context *cmd);
 int refresh_toolcontext(struct cmd_context *cmd);
 int refresh_filters(struct cmd_context *cmd);

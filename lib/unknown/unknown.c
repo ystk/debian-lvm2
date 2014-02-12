@@ -32,17 +32,17 @@ static const char *_unknown_name(const struct lv_segment *seg)
 	return seg->segtype->name;
 }
 
-static int _unknown_text_import(struct lv_segment *seg, const struct config_node *sn,
+static int _unknown_text_import(struct lv_segment *seg, const struct dm_config_node *sn,
 				struct dm_hash_table *pv_hash)
 {
-	struct config_node *new, *last = NULL, *head = NULL;
-	const struct config_node *current;
+	struct dm_config_node *new, *last = NULL, *head = NULL;
+	const struct dm_config_node *current;
 	log_verbose("importing unknown segment");
 	for (current = sn; current != NULL; current = current->sib) {
 		if (!strcmp(current->key, "type") || !strcmp(current->key, "start_extent") ||
 		    !strcmp(current->key, "tags") || !strcmp(current->key, "extent_count"))
 			continue;
-		new = clone_config_node(seg->lv->vg->vgmem, current, 0);
+		new = dm_config_clone_node_with_mem(seg->lv->vg->vgmem, current, 0);
 		if (!new)
 			return_0;
 		if (last)
@@ -57,26 +57,27 @@ static int _unknown_text_import(struct lv_segment *seg, const struct config_node
 
 static int _unknown_text_export(const struct lv_segment *seg, struct formatter *f)
 {
-	struct config_node *cn = seg->segtype_private;
+	struct dm_config_node *cn = seg->segtype_private;
 	return out_config_node(f, cn);
 }
 
 #ifdef DEVMAPPER_SUPPORT
-static int _unknown_add_target_line(struct dev_manager *dm __attribute((unused)),
-				struct dm_pool *mem __attribute((unused)),
-				struct cmd_context *cmd __attribute((unused)),
-				void **target_state __attribute((unused)),
-				struct lv_segment *seg __attribute((unused)),
+static int _unknown_add_target_line(struct dev_manager *dm __attribute__((unused)),
+				struct dm_pool *mem __attribute__((unused)),
+				struct cmd_context *cmd __attribute__((unused)),
+				void **target_state __attribute__((unused)),
+				struct lv_segment *seg __attribute__((unused)),
+				const struct lv_activate_opts *laopts __attribute__((unused)),
 				struct dm_tree_node *node, uint64_t len,
-				uint32_t *pvmove_mirror_count __attribute((unused)))
+				uint32_t *pvmove_mirror_count __attribute__((unused)))
 {
 	return dm_tree_node_add_error_target(node, len);
 }
 #endif
 
-static void _unknown_destroy(const struct segment_type *segtype)
+static void _unknown_destroy(struct segment_type *segtype)
 {
-	dm_free((void *)segtype);
+	dm_free(segtype);
 }
 
 static struct segtype_handler _unknown_ops = {
@@ -91,10 +92,12 @@ static struct segtype_handler _unknown_ops = {
 
 struct segment_type *init_unknown_segtype(struct cmd_context *cmd, const char *name)
 {
-	struct segment_type *segtype = dm_malloc(sizeof(*segtype));
+	struct segment_type *segtype = dm_zalloc(sizeof(*segtype));
 
-	if (!segtype)
-		return_NULL;
+	if (!segtype) {
+		log_error("Failed to allocate memory for unknown segtype");
+		return NULL;
+	}
 
 	segtype->cmd = cmd;
 	segtype->ops = &_unknown_ops;

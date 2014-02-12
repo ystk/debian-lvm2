@@ -113,7 +113,9 @@ static struct dev_set *_dev_set_create(struct dm_pool *mem,
 		return NULL;
 
 	ds->mem = mem;
-	ds->sys_block = dm_pool_strdup(mem, sys_block);
+	if (!(ds->sys_block = dm_pool_strdup(mem, sys_block)))
+		return NULL;
+
 	ds->sysfs_depth = sysfs_depth;
 	ds->initialised = 0;
 
@@ -282,6 +284,10 @@ static int _accept_p(struct dev_filter *f, struct device *dev)
 static void _destroy(struct dev_filter *f)
 {
 	struct dev_set *ds = (struct dev_set *) f->private;
+
+	if (f->use_count)
+		log_error(INTERNAL_ERROR "Destroying sysfs filter while in use %u times.", f->use_count);
+
 	dm_pool_destroy(ds->mem);
 }
 
@@ -316,6 +322,7 @@ struct dev_filter *sysfs_filter_create(const char *sysfs_dir)
 
 	f->passes_filter = _accept_p;
 	f->destroy = _destroy;
+	f->use_count = 0;
 	f->private = ds;
 	return f;
 
@@ -326,7 +333,7 @@ struct dev_filter *sysfs_filter_create(const char *sysfs_dir)
 
 #else
 
-struct dev_filter *sysfs_filter_create(const char *sysfs_dir __attribute((unused)))
+struct dev_filter *sysfs_filter_create(const char *sysfs_dir __attribute__((unused)))
 {
 	return NULL;
 }

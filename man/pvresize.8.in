@@ -7,8 +7,11 @@ pvresize \- resize a disk or partition in use by LVM2
 .RB [ \-h | \-\-help ]
 .RB [ \-t | \-\-test ]
 .RB [ \-v | \-\-verbose ]
-.RB [ \-\-setphysicalvolumesize size ]
-.IR PhysicalVolume " [" PhysicalVolume ...]
+.RB [ \-\-version ]
+.RB [ \-\-setphysicalvolumesize
+.IR size ]
+.I PhysicalVolume 
+.RI [ PhysicalVolume ...]
 .SH DESCRIPTION
 .B pvresize
 resizes
@@ -18,7 +21,7 @@ allocated on it.
 .SH OPTIONS
 See \fBlvm\fP(8) for common options.
 .TP
-.BR \-\-setphysicalvolumesize " size"
+.BI \-\-setphysicalvolumesize " size"
 Overrides the automatically-detected size of the PV.  Use with care, or
 prior to reducing the physical size of the device.
 .SH EXAMPLES
@@ -46,4 +49,7 @@ does.
 won't currently work correctly on LVM1 volumes or PVs with extra
 metadata areas.
 .SH SEE ALSO
-.BR lvm "(8), " pvmove "(8), " lvresize "(8), " fdisk "(8)"
+.BR lvm (8),
+.BR pvmove (8),
+.BR lvresize (8),
+.BR fdisk (8)

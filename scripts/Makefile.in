@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2006-2010 Red Hat, Inc. All rights reserved.
+# Copyright (C) 2006-2011 Red Hat, Inc. All rights reserved.
 #
 # This file is part of LVM2.
 #
@@ -22,24 +22,60 @@ ifeq ("@FSADM@", "yes")
 	SCRIPTS += fsadm.sh
 endif
 
+OCF_SCRIPTS =
+ifeq ("@OCF@", "yes")
+        OCF_SCRIPTS += VolumeGroup.ocf
+endif
+
 vpath %.sh $(srcdir)
+vpath %.ocf $(srcdir)
 
 %_install: %.sh
 	$(INSTALL_PROGRAM) -D $< $(sbindir)/$(basename $(<F))
 
+%_install: %.ocf
+	$(INSTALL_DIR) $(ocf_scriptdir)
+	$(INSTALL_SCRIPT) $< $(ocf_scriptdir)/$(basename $(<F))
+
 install_lvm2: $(SCRIPTS:.sh=_install)
 
-install: install_lvm2
+install_ocf: $(OCF_SCRIPTS:.ocf=_install)
+
+install: install_lvm2 install_ocf
 
 # FIXME Customise for other distributions
 install_initscripts:
-	$(INSTALL_DIR) $(DESTDIR)/etc/rc.d/init.d
-	$(INSTALL_SCRIPT) lvm2_monitoring_init_red_hat $(DESTDIR)/etc/rc.d/init.d/lvm2-monitor
+	$(INSTALL_DIR) $(initdir)
+ifeq ("@BUILD_DMEVENTD@", "yes")
+	$(INSTALL_SCRIPT) lvm2_monitoring_init_red_hat $(initdir)/lvm2-monitor
+endif
+ifeq ("@BUILD_LVMETAD@", "yes")
+	$(INSTALL_SCRIPT) lvm2_lvmetad_init_red_hat $(initdir)/lvm2-lvmetad
+endif
 ifneq ("@CLVMD@", "none")
-	$(INSTALL_SCRIPT) clvmd_init_red_hat $(DESTDIR)/etc/rc.d/init.d/clvmd
+	$(INSTALL_SCRIPT) clvmd_init_red_hat $(initdir)/clvmd
 endif
 ifeq ("@BUILD_CMIRRORD@", "yes")
-	$(INSTALL_SCRIPT) cmirrord_init_red_hat $(DESTDIR)/etc/rc.d/init.d/cmirrord
+	$(INSTALL_SCRIPT) cmirrord_init_red_hat $(initdir)/cmirrord
 endif
 
-DISTCLEAN_TARGETS += clvmd_init_red_hat cmirrord_init_red_hat lvm2_monitoring_init_red_hat
+install_systemd_units:
+	$(INSTALL_DIR) $(systemd_dir)
+ifeq ("@BUILD_DMEVENTD@", "yes")
+	$(INSTALL_DATA) dm_event_systemd_red_hat.socket $(systemd_dir)/dm-event.socket
+	$(INSTALL_DATA) dm_event_systemd_red_hat.service $(systemd_dir)/dm-event.service
+	$(INSTALL_DATA) lvm2_monitoring_systemd_red_hat.service $(systemd_dir)/lvm2-monitor.service
+endif
+ifeq ("@BUILD_LVMETAD@", "yes")
+	$(INSTALL_DATA) lvm2_lvmetad_systemd_red_hat.socket $(systemd_dir)/lvm2-lvmetad.socket
+	$(INSTALL_DATA) lvm2_lvmetad_systemd_red_hat.service $(systemd_dir)/lvm2-lvmetad.service
+endif
+
+install_tmpfiles_configuration:
+	$(INSTALL_DIR) $(tmpfiles_dir)
+	$(INSTALL_DATA) lvm2_tmpfiles_red_hat.conf $(tmpfiles_dir)/lvm2.conf
+
+DISTCLEAN_TARGETS += clvmd_init_red_hat cmirrord_init_red_hat lvm2_monitoring_init_red_hat \
+		     dm_event_systemd_red_hat.service lvm2_monitoring_systemd_red_hat.service \
+		     lvm2_lvmetad_systemd_red_hat.socket lvm2_lvmetad_systemd_red_hat.service \
+		     lvm2_lvmetad_init_red_hat lvm2_tmpfiles_red_hat.conf

@@ -25,7 +25,7 @@ static struct volume_group *_get_old_vg_for_rename(struct cmd_context *cmd,
 	   nevertheless. */
 	vg = vg_read_for_update(cmd, vg_name_old, vgid, READ_ALLOW_EXPORTED);
 	if (vg_read_error(vg)) {
-		vg_release(vg);
+		release_vg(vg);
 		return_NULL;
 	}
 
@@ -63,7 +63,7 @@ static int vg_rename_path(struct cmd_context *cmd, const char *old_vg_path,
 	int found_id = 0;
 	struct dm_list *vgids;
 	struct str_list *sl;
-	char *vg_name_new;
+	const char *vg_name_new;
 	const char *vgid = NULL, *vg_name, *vg_name_old;
 	char old_path[NAME_LEN], new_path[NAME_LEN];
 	struct volume_group *vg = NULL;
@@ -79,6 +79,10 @@ static int vg_rename_path(struct cmd_context *cmd, const char *old_vg_path,
 
 	log_verbose("Checking for existing volume group \"%s\"", vg_name_old);
 
+	/* populate lvmcache */
+	if (!lvmetad_vg_list_to_lvmcache(cmd))
+		stack;
+
 	/* Avoid duplicates */
 	if (!(vgids = get_vgids(cmd, 0)) || dm_list_empty(vgids)) {
 		log_error("No complete volume groups found");
@@ -87,7 +91,7 @@ static int vg_rename_path(struct cmd_context *cmd, const char *old_vg_path,
 
 	dm_list_iterate_items(sl, vgids) {
 		vgid = sl->str;
-		if (!vgid || !(vg_name = vgname_from_vgid(NULL, vgid)))
+		if (!vgid || !(vg_name = lvmcache_vgname_from_vgid(NULL, vgid)))
 			continue;
 		if (!strcmp(vg_name, vg_name_old)) {
 			if (match) {
@@ -102,7 +106,7 @@ static int vg_rename_path(struct cmd_context *cmd, const char *old_vg_path,
 	log_suppress(2);
 	found_id = id_read_format(&id, vg_name_old);
 	log_suppress(0);
-	if (found_id && (vg_name = vgname_from_vgid(cmd->mem, (char *)id.uuid))) {
+	if (found_id && (vg_name = lvmcache_vgname_from_vgid(cmd->mem, (char *)id.uuid))) {
 		vg_name_old = vg_name;
 		vgid = (char *)id.uuid;
 	} else
@@ -135,7 +139,8 @@ static int vg_rename_path(struct cmd_context *cmd, const char *old_vg_path,
 		goto error;
 
 	/* Remove references based on old name */
-	drop_cached_metadata(vg);
+	if (!drop_cached_metadata(vg))
+		stack;
 
 	/* Change the volume group name */
 	vg_rename(cmd, vg, vg_name_new);
@@ -164,8 +169,10 @@ static int vg_rename_path(struct cmd_context *cmd, const char *old_vg_path,
 		}
 	}
 
-	backup(vg);
-	backup_remove(cmd, vg_name_old);
+	if (!backup(vg))
+		stack;
+	if (!backup_remove(cmd, vg_name_old))
+		stack;
 
 	unlock_vg(cmd, vg_name_new);
 	unlock_and_release_vg(cmd, vg, vg_name_old);

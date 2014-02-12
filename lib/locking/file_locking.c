@@ -112,13 +112,13 @@ static void _remove_ctrl_c_handler(void)
 		log_sys_error("signal", "_remove_ctrl_c_handler");
 }
 
-static void _trap_ctrl_c(int sig __attribute((unused)))
+static void _trap_ctrl_c(int sig __attribute__((unused)))
 {
 	_remove_ctrl_c_handler();
 	log_error("CTRL-c detected: giving up waiting for lock");
 }
 
-static void _install_ctrl_c_handler()
+static void _install_ctrl_c_handler(void)
 {
 	_handler_installed = 1;
 
@@ -161,7 +161,8 @@ static int _do_flock(const char *file, int *fd, int operation, uint32_t nonblock
 		if (r) {
 			errno = old_errno;
 			log_sys_error("flock", file);
-			close(*fd);
+			if (close(*fd))
+				log_sys_error("close", file);
 			return 0;
 		}
 
@@ -234,10 +235,12 @@ static int _lock_file(const char *file, uint32_t flags)
 	log_very_verbose("Locking %s %c%c", ll->res, state,
 			 nonblock ? ' ' : 'B');
 
+	(void) dm_prepare_selinux_context(file, S_IFREG);
 	if (_prioritise_write_locks)
 		r = _do_write_priority_flock(file, &ll->lf, operation, nonblock);
 	else 
 		r = _do_flock(file, &ll->lf, operation, nonblock);
+	(void) dm_prepare_selinux_context(NULL, 0);
 
 	if (r)
 		dm_list_add(&_lock_list, &ll->list);
@@ -254,6 +257,8 @@ static int _file_lock_resource(struct cmd_context *cmd, const char *resource,
 			       uint32_t flags)
 {
 	char lockfile[PATH_MAX];
+	unsigned origin_only = (flags & LCK_ORIGIN_ONLY) ? 1 : 0;
+	unsigned revert = (flags & LCK_REVERT) ? 1 : 0;
 
 	switch (flags & LCK_SCOPE_MASK) {
 	case LCK_VG:
@@ -261,16 +266,27 @@ static int _file_lock_resource(struct cmd_context *cmd, const char *resource,
 		if (strcmp(resource, VG_GLOBAL))
 			lvmcache_drop_metadata(resource, 0);
 
+		if (!strcmp(resource, VG_SYNC_NAMES))
+			fs_unlock();
+
 		/* LCK_CACHE does not require a real lock */
 		if (flags & LCK_CACHE)
 			break;
 
-		if (is_orphan_vg(resource) || is_global_vg(resource))
-			dm_snprintf(lockfile, sizeof(lockfile),
-				     "%s/P_%s", _lock_dir, resource + 1);
-		else
-			dm_snprintf(lockfile, sizeof(lockfile),
-				     "%s/V_%s", _lock_dir, resource);
+		if (is_orphan_vg(resource) || is_global_vg(resource)) {
+			if (dm_snprintf(lockfile, sizeof(lockfile),
+					"%s/P_%s", _lock_dir, resource + 1) < 0) {
+				log_error("Too long locking filename %s/P_%s.",
+					  _lock_dir, resource + 1);
+				return 0;
+			}
+		} else
+			if (dm_snprintf(lockfile, sizeof(lockfile),
+					"%s/V_%s", _lock_dir, resource) < 0) {
+				log_error("Too long locking filename %s/V_%s.",
+					  _lock_dir, resource);
+				return 0;
+			}
 
 		if (!_lock_file(lockfile, flags))
 			return_0;
@@ -278,8 +294,8 @@ static int _file_lock_resource(struct cmd_context *cmd, const char *resource,
 	case LCK_LV:
 		switch (flags & LCK_TYPE_MASK) {
 		case LCK_UNLOCK:
-			log_very_verbose("Unlocking LV %s", resource);
-			if (!lv_resume_if_active(cmd, resource))
+			log_very_verbose("Unlocking LV %s%s%s", resource, origin_only ? " without snapshots" : "", revert ? " (reverting)" : "");
+			if (!lv_resume_if_active(cmd, resource, origin_only, 0, revert))
 				return 0;
 			break;
 		case LCK_NULL:
@@ -296,8 +312,8 @@ static int _file_lock_resource(struct cmd_context *cmd, const char *resource,
 			log_very_verbose("Locking LV %s (PR) - ignored", resource);
 			break;
 		case LCK_WRITE:
-			log_very_verbose("Locking LV %s (W)", resource);
-			if (!lv_suspend_if_active(cmd, resource))
+			log_very_verbose("Locking LV %s (W)%s", resource, origin_only ? " without snapshots" : "");
+			if (!lv_suspend_if_active(cmd, resource, origin_only, 0))
 				return 0;
 			break;
 		case LCK_EXCL:
@@ -318,23 +334,36 @@ static int _file_lock_resource(struct cmd_context *cmd, const char *resource,
 	return 1;
 }
 
-int init_file_locking(struct locking_type *locking, struct cmd_context *cmd)
+int init_file_locking(struct locking_type *locking, struct cmd_context *cmd,
+		      int suppress_messages)
 {
+	int r;
+	const char *locking_dir;
+
 	locking->lock_resource = _file_lock_resource;
 	locking->reset_locking = _reset_file_locking;
 	locking->fin_locking = _fin_file_locking;
 	locking->flags = 0;
 
 	/* Get lockfile directory from config file */
-	strncpy(_lock_dir, find_config_tree_str(cmd, "global/locking_dir",
-						DEFAULT_LOCK_DIR),
-		sizeof(_lock_dir));
+	locking_dir = find_config_tree_str(cmd, "global/locking_dir",
+					   DEFAULT_LOCK_DIR);
+	if (strlen(locking_dir) >= sizeof(_lock_dir)) {
+		log_error("Path for locking_dir %s is invalid.", locking_dir);
+		return 0;
+	}
+
+	strcpy(_lock_dir, locking_dir);
 
 	_prioritise_write_locks =
 	    find_config_tree_bool(cmd, "global/prioritise_write_locks",
 				  DEFAULT_PRIORITISE_WRITE_LOCKS);
 
-	if (!dm_create_dir(_lock_dir))
+	(void) dm_prepare_selinux_context(_lock_dir, S_IFDIR);
+	r = dm_create_dir(_lock_dir);
+	(void) dm_prepare_selinux_context(NULL, 0);
+
+	if (!r)
 		return 0;
 
 	/* Trap a read-only file system */
@@ -344,12 +373,14 @@ int init_file_locking(struct locking_type *locking, struct cmd_context *cmd)
 	dm_list_init(&_lock_list);
 
 	if (sigfillset(&_intsigset) || sigfillset(&_fullsigset)) {
-		log_sys_error("sigfillset", "init_file_locking");
+		log_sys_error_suppress(suppress_messages, "sigfillset",
+				       "init_file_locking");
 		return 0;
 	}
 
 	if (sigdelset(&_intsigset, SIGINT)) {
-		log_sys_error("sigdelset", "init_file_locking");
+		log_sys_error_suppress(suppress_messages, "sigdelset",
+				       "init_file_locking");
 		return 0;
 	}
 

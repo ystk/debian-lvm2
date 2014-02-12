@@ -28,12 +28,7 @@
 #include "sharedlib.h"
 #include "str_list.h"
 
-#ifdef DMEVENTD
-#  include "libdevmapper-event.h"
-#endif
-
-static int _block_on_error_available = 0;
-static unsigned _mirror_attributes = 0;
+#include <sys/utsname.h>
 
 enum {
 	MIRR_DISABLED,
@@ -74,55 +69,50 @@ static void _mirrored_display(const struct lv_segment *seg)
 	log_print(" ");
 }
 
-static int _mirrored_text_import_area_count(struct config_node *sn, uint32_t *area_count)
+static int _mirrored_text_import_area_count(const struct dm_config_node *sn, uint32_t *area_count)
 {
-	if (!get_config_uint32(sn, "mirror_count", area_count)) {
+	if (!dm_config_get_uint32(sn, "mirror_count", area_count)) {
 		log_error("Couldn't read 'mirror_count' for "
-			  "segment '%s'.", config_parent_name(sn));
+			  "segment '%s'.", dm_config_parent_name(sn));
 		return 0;
 	}
 
 	return 1;
 }
 
-static int _mirrored_text_import(struct lv_segment *seg, const struct config_node *sn,
+static int _mirrored_text_import(struct lv_segment *seg, const struct dm_config_node *sn,
 			struct dm_hash_table *pv_hash)
 {
-	const struct config_node *cn;
-	char *logname = NULL;
+	const struct dm_config_value *cv;
+	const char *logname = NULL;
 
-	if (find_config_node(sn, "extents_moved")) {
-		if (get_config_uint32(sn, "extents_moved",
+	if (dm_config_has_node(sn, "extents_moved")) {
+		if (dm_config_get_uint32(sn, "extents_moved",
 				      &seg->extents_copied))
 			seg->status |= PVMOVE;
 		else {
 			log_error("Couldn't read 'extents_moved' for "
 				  "segment %s of logical volume %s.",
-				  config_parent_name(sn), seg->lv->name);
+				  dm_config_parent_name(sn), seg->lv->name);
 			return 0;
 		}
 	}
 
-	if (find_config_node(sn, "region_size")) {
-		if (!get_config_uint32(sn, "region_size",
+	if (dm_config_has_node(sn, "region_size")) {
+		if (!dm_config_get_uint32(sn, "region_size",
 				      &seg->region_size)) {
 			log_error("Couldn't read 'region_size' for "
 				  "segment %s of logical volume %s.",
-				  config_parent_name(sn), seg->lv->name);
+				  dm_config_parent_name(sn), seg->lv->name);
 			return 0;
 		}
 	}
 
-	if ((cn = find_config_node(sn, "mirror_log"))) {
-		if (!cn->v || !cn->v->v.str) {
-			log_error("Mirror log type must be a string.");
-			return 0;
-		}
-		logname = cn->v->v.str;
+	if (dm_config_get_str(sn, "mirror_log", &logname)) {
 		if (!(seg->log_lv = find_lv(seg->lv->vg, logname))) {
 			log_error("Unrecognised mirror log in "
 				  "segment %s of logical volume %s.",
-				  config_parent_name(sn), seg->lv->name);
+				  dm_config_parent_name(sn), seg->lv->name);
 			return 0;
 		}
 		seg->log_lv->status |= MIRROR_LOG;
@@ -131,18 +121,18 @@ static int _mirrored_text_import(struct lv_segment *seg, const struct config_nod
 	if (logname && !seg->region_size) {
 		log_error("Missing region size for mirror log for "
 			  "segment %s of logical volume %s.",
-			  config_parent_name(sn), seg->lv->name);
+			  dm_config_parent_name(sn), seg->lv->name);
 		return 0;
 	}
 
-	if (!(cn = find_config_node(sn, "mirrors"))) {
+	if (!dm_config_get_list(sn, "mirrors", &cv)) {
 		log_error("Couldn't find mirrors array for "
 			  "segment %s of logical volume %s.",
-			  config_parent_name(sn), seg->lv->name);
+			  dm_config_parent_name(sn), seg->lv->name);
 		return 0;
 	}
 
-	return text_import_areas(seg, sn, cn, pv_hash, MIRROR_IMAGE);
+	return text_import_areas(seg, sn, cv, pv_hash, MIRROR_IMAGE);
 }
 
 static int _mirrored_text_export(const struct lv_segment *seg, struct formatter *f)
@@ -160,6 +150,9 @@ static int _mirrored_text_export(const struct lv_segment *seg, struct formatter 
 }
 
 #ifdef DEVMAPPER_SUPPORT
+static int _block_on_error_available = 0;
+static unsigned _mirror_attributes = 0;
+
 static struct mirror_state *_mirrored_init_target(struct dm_pool *mem,
 					 struct cmd_context *cmd)
 {
@@ -179,14 +172,13 @@ static struct mirror_state *_mirrored_init_target(struct dm_pool *mem,
 }
 
 static int _mirrored_target_percent(void **target_state,
-				    percent_range_t *percent_range,
+				    percent_t *percent,
 				    struct dm_pool *mem,
 				    struct cmd_context *cmd,
 				    struct lv_segment *seg, char *params,
 				    uint64_t *total_numerator,
 				    uint64_t *total_denominator)
 {
-	struct mirror_state *mirr_state;
 	uint64_t numerator, denominator;
 	unsigned mirror_count, m;
 	int used;
@@ -194,8 +186,6 @@ static int _mirrored_target_percent(void **target_state,
 
 	if (!*target_state)
 		*target_state = _mirrored_init_target(mem, cmd);
-
-	mirr_state = *target_state;
 
 	/* Status line: <#mirrors> (maj:min)+ <synced>/<total_regions> */
 	log_debug("Mirror status: %s", params);
@@ -229,17 +219,133 @@ static int _mirrored_target_percent(void **target_state,
 	if (seg)
 		seg->extents_copied = seg->area_len * numerator / denominator;
 
-	if (numerator == denominator)
-		*percent_range = PERCENT_100;
-	else if (numerator == 0)
-		*percent_range = PERCENT_0;
-	else
-		*percent_range = PERCENT_0_TO_100;
+        *percent = make_percent(numerator, denominator);
+
+	return 1;
+}
+
+static int _mirrored_transient_status(struct lv_segment *seg, char *params)
+{
+	unsigned i, j;
+	struct logical_volume *lv = seg->lv;
+	struct lvinfo info;
+	char *p = NULL;
+	char **args, **log_args;
+	struct logical_volume **images;
+	struct logical_volume *log;
+	unsigned num_devs, log_argc;
+	int failed = 0;
+	char *status;
+
+	log_very_verbose("Mirrored transient status: \"%s\"", params);
+
+	/* number of devices */
+	if (!dm_split_words(params, 1, 0, &p))
+		return_0;
+
+	if (!(num_devs = (unsigned) atoi(p)))
+		return_0;
+
+	p += strlen(p) + 1;
+
+	if (num_devs > DEFAULT_MIRROR_MAX_IMAGES) {
+		log_error("Unexpectedly many (%d) mirror images in %s.",
+			  num_devs, lv->name);
+		return 0;
+	}
+
+	args = alloca((num_devs + 5) * sizeof(char *));
+	images = alloca(num_devs * sizeof(struct logical_volume *));
+
+	/* FIXME: dm_split_words()  should return unsigned */
+	if ((unsigned)dm_split_words(p, num_devs + 4, 0, args) < num_devs + 4)
+		return_0;
+
+	log_argc = (unsigned) atoi(args[3 + num_devs]);
+
+	if (log_argc > 16) {
+		log_error("Unexpectedly many (%d) log arguments in %s.",
+			  log_argc, lv->name);
+		return 0;
+	}
+
+	log_args = alloca(log_argc * sizeof(char *));
+
+	if ((unsigned)dm_split_words(args[3 + num_devs] + strlen(args[3 + num_devs]) + 1,
+				     log_argc, 0, log_args) < log_argc)
+		return_0;
+
+	if (num_devs != seg->area_count) {
+		log_error("Active mirror has a wrong number of mirror images!");
+		log_error("Metadata says %d, kernel says %d.", seg->area_count, num_devs);
+		return 0;
+	}
+
+	if (!strcmp(log_args[0], "disk")) {
+		char buf[32];
+		log = first_seg(lv)->log_lv;
+		if (!lv_info(lv->vg->cmd, log, 0, &info, 0, 0)) {
+			log_error("Check for existence of mirror log %s failed.",
+				  log->name);
+			return 0;
+		}
+		log_debug("Found mirror log at %d:%d", info.major, info.minor);
+		sprintf(buf, "%d:%d", info.major, info.minor);
+		if (strcmp(buf, log_args[1])) {
+			log_error("Mirror log mismatch. Metadata says %s, kernel says %s.",
+				  buf, log_args[1]);
+			return 0;
+		}
+		log_very_verbose("Status of log (%s): %s", buf, log_args[2]);
+		if (log_args[2][0] != 'A') {
+			log->status |= PARTIAL_LV;
+			++failed;
+		}
+	}
+
+	for (i = 0; i < num_devs; ++i)
+		images[i] = NULL;
+
+	for (i = 0; i < seg->area_count; ++i) {
+		char buf[32];
+		if (!lv_info(lv->vg->cmd, seg_lv(seg, i), 0, &info, 0, 0)) {
+			log_error("Check for existence of mirror image %s failed.",
+				  seg_lv(seg, i)->name);
+			return 0;
+		}
+		log_debug("Found mirror image at %d:%d", info.major, info.minor);
+		sprintf(buf, "%d:%d", info.major, info.minor);
+		for (j = 0; j < num_devs; ++j) {
+			if (!strcmp(buf, args[j])) {
+			    log_debug("Match: metadata image %d matches kernel image %d", i, j);
+			    images[j] = seg_lv(seg, i);
+			}
+		}
+	}
+
+	status = args[2 + num_devs];
+
+	for (i = 0; i < num_devs; ++i) {
+		if (!images[i]) {
+			log_error("Failed to find image %d (%s).", i, args[i]);
+			return 0;
+		}
+		log_very_verbose("Status of image %d: %c", i, status[i]);
+		if (status[i] != 'A') {
+			images[i]->status |= PARTIAL_LV;
+			++failed;
+		}
+	}
+
+	/* update PARTIAL_LV flags across the VG */
+	if (failed)
+		vg_mark_partial_lvs(lv->vg, 0);
 
 	return 1;
 }
 
 static int _add_log(struct dm_pool *mem, struct lv_segment *seg,
+		    const struct lv_activate_opts *laopts,
 		    struct dm_tree_node *node, uint32_t area_count, uint32_t region_size)
 {
 	unsigned clustered = 0;
@@ -250,8 +356,7 @@ static int _add_log(struct dm_pool *mem, struct lv_segment *seg,
 	 * Use clustered mirror log for non-exclusive activation
 	 * in clustered VG.
 	 */
-	if ((!(seg->lv->status & ACTIVATE_EXCL) &&
-	      (vg_is_clustered(seg->lv->vg))))
+	if (!laopts->exclusive && vg_is_clustered(seg->lv->vg))
 		clustered = 1;
 
 	if (seg->log_lv) {
@@ -281,10 +386,11 @@ static int _add_log(struct dm_pool *mem, struct lv_segment *seg,
 }
 
 static int _mirrored_add_target_line(struct dev_manager *dm, struct dm_pool *mem,
-				struct cmd_context *cmd, void **target_state,
-				struct lv_segment *seg,
-				struct dm_tree_node *node, uint64_t len,
-				uint32_t *pvmove_mirror_count)
+				     struct cmd_context *cmd, void **target_state,
+				     struct lv_segment *seg,
+				     const struct lv_activate_opts *laopts,
+				     struct dm_tree_node *node, uint64_t len,
+				     uint32_t *pvmove_mirror_count)
 {
 	struct mirror_state *mirr_state;
 	uint32_t area_count = seg->area_count;
@@ -293,8 +399,9 @@ static int _mirrored_add_target_line(struct dev_manager *dm, struct dm_pool *mem
 	uint32_t region_size;
 	int r;
 
-	if (!*target_state)
-		*target_state = _mirrored_init_target(mem, cmd);
+	if (!*target_state &&
+	    !(*target_state = _mirrored_init_target(mem, cmd)))
+                return_0;
 
 	mirr_state = *target_state;
 
@@ -322,7 +429,9 @@ static int _mirrored_add_target_line(struct dev_manager *dm, struct dm_pool *mem
 	}
 
 	if (mirror_status != MIRR_RUNNING) {
-		if (!dm_tree_node_add_linear_target(node, len))
+		if (!add_linear_area_to_dtree(node, len, seg->lv->vg->extent_size,
+					      cmd->use_linear_target,
+					      seg->lv->vg->name, seg->lv->name))
 			return_0;
 		goto done;
 	}
@@ -342,7 +451,7 @@ static int _mirrored_add_target_line(struct dev_manager *dm, struct dm_pool *mem
 	if (!dm_tree_node_add_mirror_target(node, len))
 		return_0;
 
-	if ((r = _add_log(mem, seg, node, area_count, region_size)) <= 0) {
+	if ((r = _add_log(mem, seg, laopts, node, area_count, region_size)) <= 0) {
 		stack;
 		return r;
 	}
@@ -360,6 +469,8 @@ static int _mirrored_target_present(struct cmd_context *cmd,
 	uint32_t maj, min, patchlevel;
 	unsigned maj2, min2, patchlevel2;
 	char vsn[80];
+	struct utsname uts;
+	unsigned kmaj, kmin, krel;
 
 	if (!_mirrored_checked) {
 		_mirrored_present = target_present(cmd, "mirror", 1);
@@ -392,8 +503,37 @@ static int _mirrored_target_present(struct cmd_context *cmd,
 	 * FIXME: Fails incorrectly if cmirror was built into kernel.
 	 */
 	if (attributes) {
-		if (!_mirror_attributes && module_present(cmd, "log-clustered"))
-			_mirror_attributes |= MIRROR_LOG_CLUSTERED;
+		if (!_mirror_attributes) {
+			/*
+			 * The dm-log-userspace module was added to the
+			 * 2.6.31 kernel.
+			 */
+			if (!uname(&uts) &&
+			    (sscanf(uts.release, "%u.%u.%u", &kmaj, &kmin, &krel) == 3) &&
+			    KERNEL_VERSION(kmaj, kmin, krel) < KERNEL_VERSION(2, 6, 31)) {
+				if (module_present(cmd, "log-clustered"))
+					_mirror_attributes |= MIRROR_LOG_CLUSTERED;
+			} else if (module_present(cmd, "log-userspace"))
+				_mirror_attributes |= MIRROR_LOG_CLUSTERED;
+
+			if (!(_mirror_attributes & MIRROR_LOG_CLUSTERED))
+				log_verbose("Cluster mirror log module is not available");
+
+			/*
+			 * The cluster mirror log daemon must be running,
+			 * otherwise, the kernel module will fail to make
+			 * contact.
+			 */
+#ifdef CMIRRORD_PIDFILE
+			if (!dm_daemon_is_running(CMIRRORD_PIDFILE)) {
+				log_verbose("Cluster mirror log daemon is not running");
+				_mirror_attributes &= ~MIRROR_LOG_CLUSTERED;
+			}
+#else
+			log_verbose("Cluster mirror log daemon not included in build");
+			_mirror_attributes &= ~MIRROR_LOG_CLUSTERED;
+#endif
+		}
 		*attributes = _mirror_attributes;
 	}
 	_mirrored_checked = 1;
@@ -402,116 +542,24 @@ static int _mirrored_target_present(struct cmd_context *cmd,
 }
 
 #ifdef DMEVENTD
-static int _get_mirror_dso_path(struct cmd_context *cmd, char **dso)
+static const char *_get_mirror_dso_path(struct cmd_context *cmd)
 {
-	char *path;
-	const char *libpath;
-
-	if (!(path = dm_pool_alloc(cmd->mem, PATH_MAX))) {
-		log_error("Failed to allocate dmeventd library path.");
-		return 0;
-	}
-
-	libpath = find_config_tree_str(cmd, "dmeventd/mirror_library",
-				       DEFAULT_DMEVENTD_MIRROR_LIB);
-
-	get_shared_library_path(cmd, libpath, path, PATH_MAX);
-
-	*dso = path;
-
-	return 1;
+	return get_monitor_dso_path(cmd, find_config_tree_str(cmd, "dmeventd/mirror_library",
+							      DEFAULT_DMEVENTD_MIRROR_LIB));
 }
 
-static struct dm_event_handler *_create_dm_event_handler(const char *dmuuid,
-							 const char *dso,
-							 enum dm_event_mask mask)
+/* FIXME Cache this */
+static int _target_registered(struct lv_segment *seg, int *pending)
 {
-	struct dm_event_handler *dmevh;
-
-	if (!(dmevh = dm_event_handler_create()))
-		return_0;
-
-       if (dm_event_handler_set_dso(dmevh, dso))
-		goto fail;
-
-	if (dm_event_handler_set_uuid(dmevh, dmuuid))
-		goto fail;
-
-	dm_event_handler_set_event_mask(dmevh, mask);
-	return dmevh;
-
-fail:
-	dm_event_handler_destroy(dmevh);
-	return NULL;
-}
-
-static int _target_monitored(struct lv_segment *seg, int *pending)
-{
-	char *dso, *uuid;
-	struct logical_volume *lv;
-	struct volume_group *vg;
-	enum dm_event_mask evmask = 0;
-	struct dm_event_handler *dmevh;
-
-	lv = seg->lv;
-	vg = lv->vg;
-
-	*pending = 0;
-	if (!_get_mirror_dso_path(vg->cmd, &dso))
-		return_0;
-
-	if (!(uuid = build_dm_uuid(vg->cmd->mem, lv->lvid.s, NULL)))
-		return_0;
-
-	if (!(dmevh = _create_dm_event_handler(uuid, dso, DM_EVENT_ALL_ERRORS)))
-		return_0;
-
-	if (dm_event_get_registered_device(dmevh, 0)) {
-		dm_event_handler_destroy(dmevh);
-		return 0;
-	}
-
-	evmask = dm_event_handler_get_event_mask(dmevh);
-	if (evmask & DM_EVENT_REGISTRATION_PENDING) {
-		*pending = 1;
-		evmask &= ~DM_EVENT_REGISTRATION_PENDING;
-	}
-
-	dm_event_handler_destroy(dmevh);
-
-	return evmask;
+	return target_registered_with_dmeventd(seg->lv->vg->cmd, _get_mirror_dso_path(seg->lv->vg->cmd),
+					       seg->lv, pending);
 }
 
 /* FIXME This gets run while suspended and performs banned operations. */
-static int _target_set_events(struct lv_segment *seg,
-			      int evmask __attribute((unused)), int set)
+static int _target_set_events(struct lv_segment *seg, int evmask, int set)
 {
-	char *dso, *uuid;
-	struct logical_volume *lv;
-	struct volume_group *vg;
-	struct dm_event_handler *dmevh;
-	int r;
-
-	lv = seg->lv;
-	vg = lv->vg;
-
-	if (!_get_mirror_dso_path(vg->cmd, &dso))
-		return_0;
-
-	if (!(uuid = build_dm_uuid(vg->cmd->mem, lv->lvid.s, NULL)))
-		return_0;
-
-	if (!(dmevh = _create_dm_event_handler(uuid, dso, DM_EVENT_ALL_ERRORS)))
-		return_0;
-
-	r = set ? dm_event_register_handler(dmevh) : dm_event_unregister_handler(dmevh);
-	dm_event_handler_destroy(dmevh);
-	if (!r)
-		return_0;
-
-	log_info("%s %s for events", set ? "Monitored" : "Unmonitored", uuid);
-
-	return 1;
+	return target_register_events(seg->lv->vg->cmd, _get_mirror_dso_path(seg->lv->vg->cmd),
+				      seg->lv, evmask, set, 0);
 }
 
 static int _target_monitor_events(struct lv_segment *seg, int events)
@@ -549,9 +597,9 @@ static int _mirrored_modules_needed(struct dm_pool *mem,
 	return 1;
 }
 
-static void _mirrored_destroy(const struct segment_type *segtype)
+static void _mirrored_destroy(struct segment_type *segtype)
 {
-	dm_free((void *) segtype);
+	dm_free(segtype);
 }
 
 static struct segtype_handler _mirrored_ops = {
@@ -564,11 +612,12 @@ static struct segtype_handler _mirrored_ops = {
 	.add_target_line = _mirrored_add_target_line,
 	.target_percent = _mirrored_target_percent,
 	.target_present = _mirrored_target_present,
-#ifdef DMEVENTD
-	.target_monitored = _target_monitored,
+	.check_transient_status = _mirrored_transient_status,
+#  ifdef DMEVENTD
+	.target_monitored = _target_registered,
 	.target_monitor_events = _target_monitor_events,
 	.target_unmonitor_events = _target_unmonitor_events,
-#endif
+#  endif	/* DMEVENTD */
 #endif
 	.modules_needed = _mirrored_modules_needed,
 	.destroy = _mirrored_destroy,
@@ -581,7 +630,7 @@ struct segment_type *init_segtype(struct cmd_context *cmd);
 struct segment_type *init_segtype(struct cmd_context *cmd)
 #endif
 {
-	struct segment_type *segtype = dm_malloc(sizeof(*segtype));
+	struct segment_type *segtype = dm_zalloc(sizeof(*segtype));
 
 	if (!segtype)
 		return_NULL;
@@ -590,7 +639,14 @@ struct segment_type *init_segtype(struct cmd_context *cmd)
 	segtype->ops = &_mirrored_ops;
 	segtype->name = "mirror";
 	segtype->private = NULL;
-	segtype->flags = SEG_AREAS_MIRRORED | SEG_MONITORED;
+	segtype->flags = SEG_AREAS_MIRRORED;
+
+#ifdef DEVMAPPER_SUPPORT
+#  ifdef DMEVENTD
+	if (_get_mirror_dso_path(cmd))
+		segtype->flags |= SEG_MONITORED;
+#  endif	/* DMEVENTD */
+#endif
 
 	log_very_verbose("Initialised segtype: %s", segtype->name);
 

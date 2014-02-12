@@ -13,26 +13,20 @@
  * Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+/* FIXME Remove duplicated functions from this file. */
+
 /*
  * Send a command to a running clvmd from the command-line
  */
 
-#define _GNU_SOURCE
-#define _FILE_OFFSET_BITS 64
-
-#include <configure.h>
-#include <stddef.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <errno.h>
-#include <unistd.h>
-#include <libdevmapper.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <limits.h>
+#include "clvmd-common.h"
 
 #include "clvm.h"
 #include "refresh_clvmd.h"
+
+#include <stddef.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 
 typedef struct lvm_response {
 	char node[255];
@@ -88,7 +82,7 @@ static int _send_request(const char *inbuf, int inlen, char **retbuf, int no_res
 	char outbuf[PIPE_BUF];
 	struct clvm_header *outheader = (struct clvm_header *) outbuf;
 	int len;
-	int off;
+	unsigned off;
 	int buflen;
 	int err;
 
@@ -157,29 +151,31 @@ static int _send_request(const char *inbuf, int inlen, char **retbuf, int no_res
 
 /* Build the structure header and parse-out wildcard node names */
 static void _build_header(struct clvm_header *head, int cmd, const char *node,
-			  int len)
+			  unsigned int len)
 {
 	head->cmd = cmd;
 	head->status = 0;
 	head->flags = 0;
+	head->xid = 0;
 	head->clientid = 0;
-	head->arglen = len;
+	if (len)
+		/* 1 byte is used from struct clvm_header.args[1], so -> len - 1 */
+		head->arglen = len - 1;
+	else {
+		head->arglen = 0;
+		*head->args = '\0';
+	}
 
-	if (node) {
-		/*
-		 * Allow a couple of special node names:
-		 * "*" for all nodes,
-		 * "." for the local node only
-		 */
-		if (strcmp(node, "*") == 0) {
-			head->node[0] = '\0';
-		} else if (strcmp(node, ".") == 0) {
-			head->node[0] = '\0';
-			head->flags = CLVMD_FLAG_LOCAL;
-		} else
-			strcpy(head->node, node);
-	} else
+	/*
+	 * Translate special node names.
+	 */
+	if (!node || !strcmp(node, NODE_ALL))
 		head->node[0] = '\0';
+	else if (!strcmp(node, NODE_LOCAL)) {
+		head->node[0] = '\0';
+		head->flags = CLVMD_FLAG_LOCAL;
+	} else
+		strcpy(head->node, node);
 }
 
 /*
@@ -206,7 +202,8 @@ static int _cluster_request(char cmd, const char *node, void *data, int len,
 		return 0;
 
 	_build_header(head, cmd, node, len);
-	memcpy(head->node + strlen(head->node) + 1, data, len);
+	if (len)
+		memcpy(head->node + strlen(head->node) + 1, data, len);
 
 	status = _send_request(outbuf, sizeof(struct clvm_header) +
 			       strlen(head->node) + len, &retbuf, no_response);
@@ -293,12 +290,12 @@ int refresh_clvmd(int all_nodes)
 {
 	int num_responses;
 	char args[1]; // No args really.
-	lvm_response_t *response;
+	lvm_response_t *response = NULL;
 	int saved_errno;
 	int status;
 	int i;
 
-	status = _cluster_request(CLVMD_CMD_REFRESH, all_nodes?"*":".", args, 0, &response, &num_responses, 0);
+	status = _cluster_request(CLVMD_CMD_REFRESH, all_nodes ? NODE_ALL : NODE_LOCAL, args, 0, &response, &num_responses, 0);
 
 	/* If any nodes were down then display them and return an error */
 	for (i = 0; i < num_responses; i++) {
@@ -327,8 +324,21 @@ int refresh_clvmd(int all_nodes)
 
 int restart_clvmd(int all_nodes)
 {
-	int dummy;
-	return _cluster_request(CLVMD_CMD_RESTART, all_nodes?"*":".", NULL, 0, NULL, &dummy, 1);
+	int dummy, status;
+
+	status = _cluster_request(CLVMD_CMD_RESTART, all_nodes ? NODE_ALL : NODE_LOCAL, NULL, 0, NULL, &dummy, 1);
+
+	/*
+	 * FIXME: we cannot receive response, clvmd re-exec before it.
+	 *        but also should not close socket too early (the whole rq is dropped then).
+	 * FIXME: This should be handled this way:
+	 *  - client waits for RESTART ack (and socket close)
+	 *  - server restarts
+	 *  - client checks that server is ready again (VERSION command?)
+	 */
+	usleep(500000);
+
+	return status;
 }
 
 int debug_clvmd(int level, int clusterwide)
@@ -336,16 +346,16 @@ int debug_clvmd(int level, int clusterwide)
 	int num_responses;
 	char args[1];
 	const char *nodes;
-	lvm_response_t *response;
+	lvm_response_t *response = NULL;
 	int saved_errno;
 	int status;
 	int i;
 
 	args[0] = level;
 	if (clusterwide)
-		nodes = "*";
+		nodes = NODE_ALL;
 	else
-		nodes = ".";
+		nodes = NODE_LOCAL;
 
 	status = _cluster_request(CLVMD_CMD_SET_DEBUG, nodes, args, 1, &response, &num_responses, 0);
 

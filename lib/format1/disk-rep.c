@@ -247,7 +247,7 @@ static int _read_uuids(struct disk_list *data)
 {
 	unsigned num_read = 0;
 	struct uuid_list *ul;
-	char buffer[NAME_LEN] __attribute((aligned(8)));
+	char buffer[NAME_LEN] __attribute__((aligned(8)));
 	uint64_t pos = data->pvd.pv_uuidlist_on_disk.base;
 	uint64_t end = pos + data->pvd.pv_uuidlist_on_disk.size;
 
@@ -335,9 +335,9 @@ static void __update_lvmcache(const struct format_type *fmt,
 		return;
 	}
 
-	info->device_size = xlate32(dl->pvd.pv_size) << SECTOR_SHIFT;
-	dm_list_init(&info->mdas);
-	info->status &= ~CACHE_INVALID;
+	lvmcache_set_device_size(info, xlate32(dl->pvd.pv_size) << SECTOR_SHIFT);
+	lvmcache_del_mdas(info);
+	lvmcache_make_valid(info);
 }
 
 static struct disk_list *__read_disk(const struct format_type *fmt,
@@ -415,7 +415,7 @@ struct disk_list *read_disk(const struct format_type *fmt, struct device *dev,
 {
 	struct disk_list *dl;
 
-	if (!dev_open(dev))
+	if (!dev_open_readonly(dev))
 		return_NULL;
 
 	dl = __read_disk(fmt, dev, mem, vg_name);
@@ -451,6 +451,28 @@ static void _add_pv_to_list(struct dm_list *head, struct disk_list *data)
 	dm_list_add(head, &data->list);
 }
 
+struct _read_pvs_in_vg_baton {
+	const char *vg_name;
+	struct dm_list *head;
+	struct disk_list *data;
+	struct dm_pool *mem;
+	int empty;
+};
+
+static int _read_pv_in_vg(struct lvmcache_info *info, void *baton)
+{
+	struct _read_pvs_in_vg_baton *b = baton;
+
+	b->empty = 0;
+
+	if (!lvmcache_device(info) ||
+	    !(b->data = read_disk(lvmcache_fmt(info), lvmcache_device(info), b->mem, b->vg_name)))
+		return 0; /* stop here */
+
+	_add_pv_to_list(b->head, b->data);
+	return 1;
+}
+
 /*
  * Build a list of pv_d's structures, allocated from mem.
  * We keep track of the first object allocated from the pool
@@ -462,29 +484,31 @@ int read_pvs_in_vg(const struct format_type *fmt, const char *vg_name,
 {
 	struct dev_iter *iter;
 	struct device *dev;
-	struct disk_list *data = NULL;
 	struct lvmcache_vginfo *vginfo;
-	struct lvmcache_info *info;
+	struct _read_pvs_in_vg_baton baton;
+
+	baton.head = head;
+	baton.empty = 1;
+	baton.data = NULL;
+	baton.mem = mem;
+	baton.vg_name = vg_name;
 
 	/* Fast path if we already saw this VG and cached the list of PVs */
-	if (vg_name && (vginfo = vginfo_from_vgname(vg_name, NULL)) &&
-	    vginfo->infos.n) {
-		dm_list_iterate_items(info, &vginfo->infos) {
-			dev = info->dev;
-			if (dev && !(data = read_disk(fmt, dev, mem, vg_name)))
-				break;
-			_add_pv_to_list(head, data);
+	if (vg_name && (vginfo = lvmcache_vginfo_from_vgname(vg_name, NULL))) {
+
+		lvmcache_foreach_pv(vginfo, _read_pv_in_vg, &baton);
+
+		if (!baton.empty) {
+			/* Did we find the whole VG? */
+			if (!vg_name || is_orphan_vg(vg_name) ||
+			    (baton.data && *baton.data->pvd.vg_name &&
+			     dm_list_size(head) == baton.data->vgd.pv_cur))
+				return 1;
+
+			/* Failed */
+			dm_list_init(head);
+			/* vgcache_del(vg_name); */
 		}
-
-		/* Did we find the whole VG? */
-		if (!vg_name || is_orphan_vg(vg_name) ||
-		    (data && *data->pvd.vg_name &&
-		     dm_list_size(head) == data->vgd.pv_cur))
-			return 1;
-
-		/* Failed */
-		dm_list_init(head);
-		/* vgcache_del(vg_name); */
 	}
 
 	if (!(iter = dev_iter_create(filter, 1))) {
@@ -494,8 +518,8 @@ int read_pvs_in_vg(const struct format_type *fmt, const char *vg_name,
 
 	/* Otherwise do a complete scan */
 	for (dev = dev_iter_get(iter); dev; dev = dev_iter_get(iter)) {
-		if ((data = read_disk(fmt, dev, mem, vg_name))) {
-			_add_pv_to_list(head, data);
+		if ((baton.data = read_disk(fmt, dev, mem, vg_name))) {
+			_add_pv_to_list(head, baton.data);
 		}
 	}
 	dev_iter_destroy(iter);
@@ -624,13 +648,12 @@ static int _write_pvd(struct disk_list *data)
 	/* Make sure that the gap between the PV structure and
 	   the next one is zeroed in order to make non LVM tools
 	   happy (idea from AED) */
-	buf = dm_malloc(size);
+	buf = dm_zalloc(size);
 	if (!buf) {
 		log_error("Couldn't allocate temporary PV buffer.");
 		return 0;
 	}
 
-	memset(buf, 0, size);
 	memcpy(buf, &data->pvd, sizeof(struct pv_disk));
 
 	log_debug("Writing %s PV metadata to %s at %" PRIu64 " len %"
@@ -650,7 +673,7 @@ static int _write_pvd(struct disk_list *data)
 /*
  * assumes the device has been opened.
  */
-static int __write_all_pvd(const struct format_type *fmt __attribute((unused)),
+static int __write_all_pvd(const struct format_type *fmt __attribute__((unused)),
 			   struct disk_list *data)
 {
 	const char *pv_name = dev_name(data->dev);

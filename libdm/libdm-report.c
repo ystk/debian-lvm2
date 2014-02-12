@@ -102,7 +102,7 @@ static const struct dm_report_object_type *_find_type(struct dm_report *rh,
  */
 
 int dm_report_field_string(struct dm_report *rh,
-			   struct dm_report_field *field, const char **data)
+			   struct dm_report_field *field, const char *const *data)
 {
 	char *repstr;
 
@@ -139,7 +139,7 @@ int dm_report_field_int(struct dm_report *rh,
 		return 0;
 	}
 
-	*sortval = (const uint64_t) value;
+	*sortval = (uint64_t) value;
 	field->sort_value = sortval;
 	field->report_string = repstr;
 
@@ -168,7 +168,7 @@ int dm_report_field_uint32(struct dm_report *rh,
 		return 0;
 	}
 
-	*sortval = (const uint64_t) value;
+	*sortval = (uint64_t) value;
 	field->sort_value = sortval;
 	field->report_string = repstr;
 
@@ -197,7 +197,7 @@ int dm_report_field_int32(struct dm_report *rh,
 		return 0;
 	}
 
-	*sortval = (const uint64_t) value;
+	*sortval = (uint64_t) value;
 	field->sort_value = sortval;
 	field->report_string = repstr;
 
@@ -367,33 +367,32 @@ static uint32_t _all_match(struct dm_report *rh, const char *field, size_t flen)
 {
 	size_t prefix_len;
 	const struct dm_report_object_type *t;
-	char prefixed_all[32];
+	uint32_t report_types = 0;
+	unsigned unprefixed_all_matched = 0;
 
 	if (!strncasecmp(field, "all", 3) && flen == 3) {
-		if (strlen(rh->field_prefix)) {
-			strcpy(prefixed_all, rh->field_prefix);
-			strcat(prefixed_all, "all");
-			/*
-			 * Add also prefix to receive all attributes
-			 * (e.g.LABEL/PVS use the same prefix)
-			 */
-			return rh->report_types |
-			       _all_match(rh, prefixed_all,
-					  strlen(prefixed_all));
-		} else
-			return (rh->report_types)
-				? rh->report_types : REPORT_TYPES_ALL;
+		/* If there's no report prefix, match all report types */
+		if (!(flen = strlen(rh->field_prefix)))
+			return rh->report_types ? : REPORT_TYPES_ALL;
+
+		/* otherwise include all fields beginning with the report prefix. */
+		unprefixed_all_matched = 1;
+		field = rh->field_prefix;
+		report_types = rh->report_types;
 	}
 
+	/* Combine all report types that have a matching prefix. */
 	for (t = rh->types; t->data_fn; t++) {
 		prefix_len = strlen(t->prefix);
+
 		if (!strncasecmp(t->prefix, field, prefix_len) &&
-		    !strncasecmp(field + prefix_len, "all", 3) &&
-		    flen == prefix_len + 3)
-			return t->id;
+		    ((unprefixed_all_matched && (flen == prefix_len)) ||
+		     (!strncasecmp(field + prefix_len, "all", 3) &&
+		      (flen == prefix_len + 3))))
+			report_types |= t->id;
 	}
 
-	return 0;
+	return report_types;
 }
 
 /*
@@ -542,6 +541,9 @@ static int _parse_keys(struct dm_report *rh, const char *keys,
 	const char *ws;		/* Word start */
 	const char *we = keys;	/* Word end */
 
+	if (!keys)
+		return 1;
+
 	while (*we) {
 		/* Allow consecutive commas */
 		while (*we && *we == ',')
@@ -566,16 +568,15 @@ struct dm_report *dm_report_init(uint32_t *report_types,
 				 const char *output_separator,
 				 uint32_t output_flags,
 				 const char *sort_keys,
-				 void *private)
+				 void *private_data)
 {
 	struct dm_report *rh;
 	const struct dm_report_object_type *type;
 
-	if (!(rh = dm_malloc(sizeof(*rh)))) {
+	if (!(rh = dm_zalloc(sizeof(*rh)))) {
 		log_error("dm_report_init: dm_malloc failed");
 		return 0;
 	}
-	memset(rh, 0, sizeof(*rh));
 
 	/*
 	 * rh->report_types is updated in _parse_fields() and _parse_keys()
@@ -588,7 +589,7 @@ struct dm_report *dm_report_init(uint32_t *report_types,
 	rh->separator = output_separator;
 	rh->fields = fields;
 	rh->types = types;
-	rh->private = private;
+	rh->private = private_data;
 
 	rh->flags |= output_flags & DM_REPORT_OUTPUT_MASK;
 
@@ -676,15 +677,15 @@ int dm_report_set_output_field_name_prefix(struct dm_report *rh, const char *out
 /*
  * Create a row of data for an object
  */
-static void * _report_get_field_data(struct dm_report *rh,
-			      struct field_properties *fp, void *object)
+static void *_report_get_field_data(struct dm_report *rh,
+				    struct field_properties *fp, void *object)
 {
-	void *ret = fp->type->data_fn(object);
+	char *ret = fp->type->data_fn(object);
 
 	if (!ret)
 		return NULL;
 
-	return ret + rh->fields[fp->field_num].offset;
+	return (void *)(ret + rh->fields[fp->field_num].offset);
 }
 
 int dm_report_object(struct dm_report *rh, void *object)
@@ -735,8 +736,8 @@ int dm_report_object(struct dm_report *rh, void *object)
 			return 0;
 		}
 
-		if ((strlen(field->report_string) > field->props->width))
-			field->props->width = strlen(field->report_string);
+		if (((int) strlen(field->report_string) > field->props->width))
+			field->props->width = (int) strlen(field->report_string);
 
 		if ((rh->flags & RH_SORT_REQUIRED) &&
 		    (field->props->flags & FLD_SORT_KEY)) {
@@ -758,7 +759,8 @@ static int _report_headings(struct dm_report *rh)
 {
 	struct field_properties *fp;
 	const char *heading;
-	char buf[1024];
+	char *buf = NULL;
+	size_t buf_size = 0;
 
 	if (rh->flags & RH_HEADINGS_PRINTED)
 		return 1;
@@ -774,6 +776,18 @@ static int _report_headings(struct dm_report *rh)
 		return 0;
 	}
 
+	dm_list_iterate_items(fp, &rh->field_props) {
+		if ((int) buf_size < fp->width)
+			buf_size = (size_t) fp->width;
+	}
+	/* Including trailing '\0'! */
+	buf_size++;
+
+	if (!(buf = dm_malloc(buf_size))) {
+		log_error("dm_report: Could not allocate memory for heading buffer.");
+		goto bad;
+	}
+
 	/* First heading line */
 	dm_list_iterate_items(fp, &rh->field_props) {
 		if (fp->flags & FLD_HIDDEN)
@@ -781,7 +795,7 @@ static int _report_headings(struct dm_report *rh)
 
 		heading = rh->fields[fp->field_num].heading;
 		if (rh->flags & DM_REPORT_OUTPUT_ALIGNED) {
-			if (dm_snprintf(buf, sizeof(buf), "%-*.*s",
+			if (dm_snprintf(buf, buf_size, "%-*.*s",
 					 fp->width, fp->width, heading) < 0) {
 				log_error("dm_report: snprintf heading failed");
 				goto bad;
@@ -807,9 +821,12 @@ static int _report_headings(struct dm_report *rh)
 	}
 	log_print("%s", (char *) dm_pool_end_object(rh->mem));
 
+	dm_free(buf);
+
 	return 1;
 
       bad:
+	dm_free(buf);
 	dm_pool_abandon_object(rh->mem);
 	return 0;
 }
@@ -893,25 +910,28 @@ static int _output_field(struct dm_report *rh, struct dm_report_field *field)
 	int32_t width;
 	uint32_t align;
 	const char *repstr;
-	char buf[4096];
+	char *buf = NULL;
+	size_t buf_size = 0;
 
 	if (rh->flags & DM_REPORT_OUTPUT_FIELD_NAME_PREFIX) {
-		if (!(field_id = strdup(rh->fields[field->props->field_num].id))) {
+		if (!(field_id = dm_strdup(rh->fields[field->props->field_num].id))) {
 			log_error("dm_report: Failed to copy field name");
 			return 0;
 		}
 
 		if (!dm_pool_grow_object(rh->mem, rh->output_field_name_prefix, 0)) {
 			log_error("dm_report: Unable to extend output line");
+			dm_free(field_id);
 			return 0;
 		}
 
 		if (!dm_pool_grow_object(rh->mem, _toupperstr(field_id), 0)) {
 			log_error("dm_report: Unable to extend output line");
+			dm_free(field_id);
 			return 0;
 		}
 
-		free(field_id);
+		dm_free(field_id);
 
 		if (!dm_pool_grow_object(rh->mem, "=", 1)) {
 			log_error("dm_report: Unable to extend output line");
@@ -936,25 +956,33 @@ static int _output_field(struct dm_report *rh, struct dm_report_field *field)
 		if (!(align = field->props->flags & DM_REPORT_FIELD_ALIGN_MASK))
 			align = (field->props->flags & DM_REPORT_FIELD_TYPE_NUMBER) ? 
 				DM_REPORT_FIELD_ALIGN_RIGHT : DM_REPORT_FIELD_ALIGN_LEFT;
+
+		/* Including trailing '\0'! */
+		buf_size = width + 1;
+		if (!(buf = dm_malloc(buf_size))) {
+			log_error("dm_report: Could not allocate memory for output line buffer.");
+			return 0;
+		}
+
 		if (align & DM_REPORT_FIELD_ALIGN_LEFT) {
-			if (dm_snprintf(buf, sizeof(buf), "%-*.*s",
+			if (dm_snprintf(buf, buf_size, "%-*.*s",
 					 width, width, repstr) < 0) {
 				log_error("dm_report: left-aligned snprintf() failed");
-				return 0;
+				goto bad;
 			}
 			if (!dm_pool_grow_object(rh->mem, buf, width)) {
 				log_error("dm_report: Unable to extend output line");
-				return 0;
+				goto bad;
 			}
 		} else if (align & DM_REPORT_FIELD_ALIGN_RIGHT) {
-			if (dm_snprintf(buf, sizeof(buf), "%*.*s",
+			if (dm_snprintf(buf, buf_size, "%*.*s",
 					 width, width, repstr) < 0) {
 				log_error("dm_report: right-aligned snprintf() failed");
-				return 0;
+				goto bad;
 			}
 			if (!dm_pool_grow_object(rh->mem, buf, width)) {
 				log_error("dm_report: Unable to extend output line");
-				return 0;
+				goto bad;
 			}
 		}
 	}
@@ -963,10 +991,15 @@ static int _output_field(struct dm_report *rh, struct dm_report_field *field)
 	    !(rh->flags & DM_REPORT_OUTPUT_FIELD_UNQUOTED))
 		if (!dm_pool_grow_object(rh->mem, "\'", 1)) {
 			log_error("dm_report: Unable to extend output line");
-			return 0;
+			goto bad;
 		}
 
+	dm_free(buf);
 	return 1;
+
+bad:
+	dm_free(buf);
+	return 0;
 }
 
 static int _output_as_rows(struct dm_report *rh)
@@ -975,11 +1008,6 @@ static int _output_as_rows(struct dm_report *rh)
 	struct dm_report_field *field;
 	struct row *row;
 
-	if (!dm_pool_begin_object(rh->mem, 512)) {
-		log_error("dm_report: Unable to allocate output line");
-		return 0;
-	}
-
 	dm_list_iterate_items(fp, &rh->field_props) {
 		if (fp->flags & FLD_HIDDEN) {
 			dm_list_iterate_items(row, &rh->rows) {
@@ -987,6 +1015,11 @@ static int _output_as_rows(struct dm_report *rh)
 				dm_list_del(&field->list);
 			}
 			continue;
+		}
+
+		if (!dm_pool_begin_object(rh->mem, 512)) {
+			log_error("dm_report: Unable to allocate output line");
+			return 0;
 		}
 
 		if ((rh->flags & DM_REPORT_OUTPUT_HEADINGS)) {

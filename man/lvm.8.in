@@ -205,6 +205,7 @@ is mounted read-only when the script runs.
 .TP
 \fB--addtag tag\fP
 Add the tag \fBtag\fP to a PV, VG or LV.  
+Supply this argument multiple times to add more than one tag at once.
 A tag is a word that can be used to group LVM2 objects of the same type 
 together. 
 Tags can be given on the command line in place of PV, VG or LV 
@@ -221,10 +222,13 @@ Only the new LVM2 metadata format supports tagging: objects using the
 LVM1 metadata format cannot be tagged because the on-disk format does not
 support it.
 Snapshots cannot be tagged.
-Characters allowed in tags are: A-Z a-z 0-9 _ + . -
+Characters allowed in tags are: A-Z a-z 0-9 _ + . - and 
+as of version 2.02.78 the following characters are also
+accepted: / = ! : # &
 .TP
 \fB--deltag tag\fP
 Delete the tag \fBtag\fP from a PV, VG or LV, if it's present.
+Supply this argument multiple times to remove more than one tag at once.
 .TP
 \fB--alloc AllocationPolicy\fP
 The allocation policy to use: \fBcontiguous\fP, \fBcling\fP, \fBnormal\fP, \fBanywhere\fP or \fBinherit\fP.
@@ -271,7 +275,8 @@ The following characters are valid for VG and LV names:
 VG and LV names cannot begin with a hyphen.
 There are also various reserved names that are used internally by lvm that can not be used as LV or VG names.
 A VG cannot be called anything that exists in /dev/ at the time of creation, nor can it be called '.' or '..'.
-A LV cannot be called '.' '..' 'snapshot' or 'pvmove'. The LV name may also not contain the strings '_mlog' or '_mimage'
+A LV cannot be called '.' '..' 'snapshot' or 'pvmove'. The LV name may also not contain
+the strings '_mlog', '_mimage', '_rimage', '_tdata', '_tmeta'.
 
 
 .SH DIAGNOSTICS

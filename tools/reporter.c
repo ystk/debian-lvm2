@@ -16,7 +16,7 @@
 #include "tools.h"
 #include "report.h"
 
-static int _vgs_single(struct cmd_context *cmd __attribute((unused)),
+static int _vgs_single(struct cmd_context *cmd __attribute__((unused)),
 		       const char *vg_name, struct volume_group *vg,
 		       void *handle)
 {
@@ -41,7 +41,7 @@ static int _lvs_single(struct cmd_context *cmd, struct logical_volume *lv,
 	return ECMD_PROCESSED;
 }
 
-static int _segs_single(struct cmd_context *cmd __attribute((unused)),
+static int _segs_single(struct cmd_context *cmd __attribute__((unused)),
 			struct lv_segment *seg, void *handle)
 {
 	if (!report_object(handle, seg->lv->vg, seg->lv, NULL, seg, NULL)) {
@@ -51,7 +51,6 @@ static int _segs_single(struct cmd_context *cmd __attribute((unused)),
 
 	return ECMD_PROCESSED;
 }
-
 static int _pvsegs_sub_single(struct cmd_context *cmd,
 			      struct volume_group *vg,
 			      struct pv_segment *pvseg, void *handle)
@@ -61,12 +60,13 @@ static int _pvsegs_sub_single(struct cmd_context *cmd,
 
 	struct volume_group _free_vg = {
 		.cmd = cmd,
-		.name = (char *)"",
+		.name = "",
+		.vgmem = NULL,
 	};
 
 	struct logical_volume _free_logical_volume = {
 		.vg = vg ?: &_free_vg,
-		.name = (char *) "",
+		.name = "",
 		.snapshot = NULL,
 		.status = VISIBLE_LV,
 		.major = -1,
@@ -103,10 +103,11 @@ static int _pvsegs_sub_single(struct cmd_context *cmd,
 
 	if (!report_object(handle, vg, seg ? seg->lv : &_free_logical_volume, pvseg->pv,
 			   seg ? : &_free_lv_segment, pvseg)) {
-		stack;
 		ret = ECMD_FAILED;
+                goto_out;
 	}
 
+ out:
 	return ret;
 }
 
@@ -133,7 +134,7 @@ static int _pvs_single(struct cmd_context *cmd, struct volume_group *vg,
 	int ret = ECMD_PROCESSED;
 	const char *vg_name = NULL;
 	struct volume_group *old_vg = vg;
-	char uuid[64] __attribute((aligned(8)));
+	char uuid[64] __attribute__((aligned(8)));
 
 	if (is_pv(pv) && !is_orphan(pv) && !vg) {
 		vg_name = pv_vg_name(pv);
@@ -141,7 +142,7 @@ static int _pvs_single(struct cmd_context *cmd, struct volume_group *vg,
 		vg = vg_read(cmd, vg_name, (char *)&pv->vgid, 0);
 		if (vg_read_error(vg)) {
 			log_error("Skipping volume group %s", vg_name);
-			vg_release(vg);
+			release_vg(vg);
 			return ECMD_FAILED;
 		}
 
@@ -181,7 +182,7 @@ out:
 		unlock_vg(cmd, vg_name);
 
 	if (!old_vg)
-		vg_release(vg);
+		release_vg(vg);
 
 	return ret;
 }
@@ -314,6 +315,9 @@ static int _report(struct cmd_context *cmd, int argc, char **argv,
 						  "report/pvsegs_cols_verbose",
 						  DEFAULT_PVSEGS_COLS_VERB);
 		break;
+	default:
+		log_error(INTERNAL_ERROR "Unknown report type.");
+		return ECMD_FAILED;
 	}
 
 	/* If -o supplied use it, else use default for report_type */
@@ -362,6 +366,8 @@ static int _report(struct cmd_context *cmd, int argc, char **argv,
 					  separator, aligned, buffered,
 					  headings, field_prefixes, quoted,
 					  columns_as_rows))) {
+		if (!strcasecmp(options, "help") || !strcmp(options, "?"))
+			return r;
 		stack;
 		return ECMD_FAILED;
 	}

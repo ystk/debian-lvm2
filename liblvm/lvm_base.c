@@ -13,11 +13,11 @@
  */
 
 #include "lib.h"
-#include "lvm2app.h"
 #include "toolcontext.h"
 #include "locking.h"
 #include "lvm-version.h"
 #include "metadata-exported.h"
+#include "lvm2app.h"
 
 const char *lvm_library_get_version(void)
 {
@@ -31,10 +31,13 @@ lvm_t lvm_init(const char *system_dir)
 	/* FIXME: logging bound to handle
 	 */
 
+	if (!udev_init_library_context())
+		stack;
+
 	/* create context */
 	/* FIXME: split create_toolcontext */
 	/* FIXME: make all globals configurable */
-	cmd = create_toolcontext(0, system_dir);
+	cmd = create_toolcontext(0, system_dir, 1, 0);
 	if (!cmd)
 		return NULL;
 
@@ -61,7 +64,7 @@ lvm_t lvm_init(const char *system_dir)
 	 * archive() call.  Possible example:
 	 * cmd_line = "lvm_vg_create: vg1\nlvm_vg_extend vg1 /dev/sda1\n"
 	 */
-	cmd->cmd_line = (char *)"liblvm";
+	cmd->cmd_line = "liblvm";
 
 	return (lvm_t) cmd;
 }
@@ -69,6 +72,7 @@ lvm_t lvm_init(const char *system_dir)
 void lvm_quit(lvm_t libh)
 {
 	destroy_toolcontext((struct cmd_context *)libh);
+	udev_fin_library_context();
 }
 
 int lvm_config_reload(lvm_t libh)

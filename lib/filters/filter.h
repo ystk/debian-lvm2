@@ -31,13 +31,15 @@
 #endif
 
 struct dev_filter *lvm_type_filter_create(const char *proc,
-					  const struct config_node *cn);
+					  const struct dm_config_node *cn);
 
 void lvm_type_filter_destroy(struct dev_filter *f);
 
+int dm_major(void);
 int md_major(void);
 int blkext_major(void);
 int max_partitions(int major);
+int major_is_scsi_device(int major);
 
 int dev_subsystem_part_major(const struct device *dev);
 const char *dev_subsystem_name(const struct device *dev);

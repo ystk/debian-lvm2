@@ -4,6 +4,7 @@ lvconvert \- convert a logical volume from linear to mirror or snapshot
 .SH SYNOPSIS
 .B lvconvert
 \-m|\-\-mirrors Mirrors [\-\-mirrorlog {disk|core|mirrored}] [\-\-corelog] [\-R|\-\-regionsize MirrorLogRegionSize]
+[\-\-type SegmentType]
 [\-A|\-\-alloc AllocationPolicy]
 [\-b|\-\-background] [\-f|\-\-force] [\-i|\-\-interval Seconds]
 [\-h|\-?|\-\-help]
@@ -17,7 +18,7 @@ LogicalVolume[Path] [PhysicalVolume[Path][:PE[-PE]]...]
 
 .br
 .B lvconvert
-\-\-splitmirrors Images \-\-name SplitLogicalVolumeName
+\-\-splitmirrors Images [\-\-name SplitLogicalVolumeName] [\-\-trackchanges]
 .br
 MirrorLogicalVolume[Path] [SplittablePhysicalVolume[Path][:PE[-PE]]...]
 .br
@@ -40,7 +41,7 @@ OriginalLogicalVolume[Path] SnapshotLogicalVolume[Path]
 [\-h|\-?|\-\-help]
 [\-v|\-\-verbose]
 [\-\-version]
-SnapshotLogicalVolume[Path]...
+LogicalVolume[Path]...
 .br
 
 .br
@@ -50,10 +51,20 @@ SnapshotLogicalVolume[Path]...
 [\-v|\-\-verbose]
 [\-\-version]
 LogicalVolume[Path] [PhysicalVolume[Path]...]
+
+.br
+.B lvconvert
+\-\-replace PhysicalVolume
+[\-h|\-?|\-\-help]
+[\-v|\-\-verbose]
+[\-\-version]
+LogicalVolume[Path] [PhysicalVolume[Path]...]
+
 .SH DESCRIPTION
-lvconvert will change a linear logical volume to a mirror
-logical volume or to a snapshot of linear volume and vice versa.
-It is also used to add and remove disk logs from mirror devices.
+lvconvert is used to change the segment type (i.e. linear, mirror, etc) or
+characteristics of a logical volume.  For example, it can add or remove the
+redundant images of a logical volume, change the log type of a mirror, or
+designate a logical volume as a snapshot repository.
 .br
 If the conversion requires allocation of physical extents (for
 example, when converting from linear to mirror) and you specify
@@ -93,6 +104,11 @@ The optional argument "--corelog" is the same as specifying "--mirrorlog core".
 A mirror is divided into regions of this size (in MB), and the mirror log
 uses this granularity to track which regions are in sync.
 .TP
+.I \-\-type SegmentType
+Used to convert a logical volume to another segment type or to explicitly state
+the desired RAID1 segment type ("mirror" or "raid1") when converting a linear
+logical volume to a mirror with the '-m' argument.
+.TP
 .I \-b, \-\-background
 Run the daemon in the background.
 .TP
@@ -113,7 +129,8 @@ or has rules that ignore the devices LVM2 creates.
 .I \-\-splitmirrors Images
 The number of redundant Images of a mirror to be split off and used
 to form a new logical volume.  A name must be supplied for the
-newly-split-off logical volume using the \-\-name argument.
+newly-split-off logical volume using the \-\-name argument, unless
+the \-\-trackchanges argument is given.
 
 .TP
 .I \-n Name
@@ -121,6 +138,15 @@ The name to apply to a logical volume which has been split off from
 a mirror logical volume.
 .br
 
+.TP
+.I \-\-trackchanges
+Used with \-\-splitmirrors on a raid1 device, this tracks changes so that the
+read-only detached image can be merged efficiently back into the mirror later.
+Only the regions of the detatched device where the data changed get resynchronized.
+
+Please note that this feature is only supported with the new md-based mirror
+implementation and not with the original device-mapper mirror implementation.
+.br
 
 .TP
 .I \-s, \-\-snapshot
@@ -135,8 +161,13 @@ Controls zeroing of the first KB of data in the snapshot.
 If the volume is read-only the snapshot will not be zeroed.
 .TP
 .I \-\-merge
-Merges a snapshot into its origin volume. If both the origin and snapshot volume
-are not open the merge will start immediately.  Otherwise, the merge will start
+Merges a snapshot into its origin volume or merges a raid1 image that has
+been split from its mirror with \-\-trackchanges back into its mirror.
+
+To check if your kernel supports the snapshot merge feature, look
+for 'snapshot-merge' in the output
+of 'dmsetup targets'.  If both the origin and snapshot volume are not
+open the merge will start immediately.  Otherwise, the merge will start
 the first time either the origin or snapshot are activated and both are closed.
 Merging a snapshot into an origin that cannot be closed, for example a root
 filesystem, is deferred until the next time the origin volume is activated.
@@ -148,7 +179,6 @@ be specified on the commandline or a @tag may be used to specify
 multiple snapshots be merged to their respective origin.
 .br
 
-
 .TP
 .I \-\-repair
 Repair a mirror after suffering a disk failure. The mirror will be brought back
@@ -159,11 +189,25 @@ Use \-f if you do not want any replacement.  Additionally, you may use
 viz. activation/mirror_log_fault_policy or
 activation/mirror_device_fault_policy.
 .br
+
+.TP
+.I \-\-replace PhysicalVolume
+Remove the specified device (PhysicalVolume) and replace it with one that is
+available in the volume group or from the specific list provided.  This option
+is only available to RAID segment types (e.g. "raid1", "raid5", etc).
+.br
+
 .SH Examples
 "lvconvert -m1 vg00/lvol1"
 .br
 converts the linear logical volume "vg00/lvol1" to
 a two-way mirror logical volume.
+.br
+.SH Examples
+"lvconvert --type raid1 -m1 vg00/lvol1"
+.br
+converts the linear logical volume "vg00/lvol1" to a two-way RAID1
+logical volume.
 
 "lvconvert --mirrorlog core vg00/lvol1"
 .br
@@ -180,6 +224,11 @@ to a mirror with a disk log.
 converts a mirror logical volume to a linear logical
 volume.
 .br
+"lvconvert --type raid1 vg00/mirror_lv"
+.br
+converts a mirror logical volume to a RAID1 logical volume with the same
+number of images.
+.br
 
 .br
 "lvconvert -s vg00/lvol1 vg00/lvol2"
@@ -193,7 +242,7 @@ converts linear logical volume "vg00/lvol1" to a two-way mirror, using physical
 extents /dev/sda:0-15 and /dev/sdb:0-15 for allocation of new extents.
 
 .br
-"lvconvert -m0 vg00/lvmirror1 /dev/sda
+"lvconvert -m0 vg00/lvmirror1 /dev/sda"
 .br
 converts mirror logical volume "vg00/lvmirror1" to linear, freeing physical
 extents from /dev/sda.
@@ -210,6 +259,40 @@ If vg00/lvol1, vg00/lvol2, and vg00/lvol3 are all tagged with "some_tag"
 each snapshot logical volume will be merged serially, e.g.: vg00/lvol1,
 then vg00/lvol2, then vg00/lvol3.  If --background were used it would start
 all snapshot logical volume merges in parallel.
+
+.br
+"lvconvert --splitmirrors 1 --name lv_split vg00/lvmirror1"
+.br
+Extract one image from the mirror, making it a new logical volume named
+"lv_split".  The mirror the image is extracted from is reduced accordingly.
+If it was a 2-way mirror (created with '-m 1'), then the resulting original
+volume will be linear.
+
+.br
+"lvconvert --splitmirrors 1 --trackchanges vg00/lv_raid1"
+.br
+A mirrored logical volume created with --type raid1 can use the '\-\-trackchanges' argument when splitting
+off an image.  
+
+Detach one image from the mirrored logical volume lv_raid1 as a separate
+read-only device and track the changes made to the mirror while it is detached.
+The split-off device has a name of the form lv_raid1_rimage_N, where N is
+a number, and it cannot be renamed.
+
+.br
+"lvconvert --merge vg00/lv_raid1_rimage_1"
+.br
+Merge an image that was detached temporarily from its mirror with 
+the '\-\-trackchanges' argument back into its original mirror and
+bring its contents back up-to-date.
+
+.br
+"lvconvert --replace /dev/sdb1 vg00/my_raid1 /dev/sdf1"
+.br
+Replace the physical volume "/dev/sdb1" in the RAID1 logical volume "my_raid1"
+with the specified physical volume "/dev/sdf1".  Had the argument "/dev/sdf1"
+been left out, lvconvert would attempt to find a suitable device from those
+available in the volume group.
 
 .SH SEE ALSO
 .BR lvm (8),

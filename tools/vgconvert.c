@@ -17,16 +17,14 @@
 
 static int vgconvert_single(struct cmd_context *cmd, const char *vg_name,
 			    struct volume_group *vg,
-			    void *handle __attribute((unused)))
+			    void *handle __attribute__((unused)))
 {
 	struct physical_volume *pv, *existing_pv;
 	struct logical_volume *lv;
 	struct lv_list *lvl;
-	uint64_t size = 0;
-	struct dm_list mdas;
 	int pvmetadatacopies = 0;
 	uint64_t pvmetadatasize = 0;
-	uint64_t pe_end = 0, pe_start = 0;
+	uint64_t pe_start = 0;
 	struct pv_list *pvl;
 	int change_made = 0;
 	struct lvinfo info;
@@ -44,7 +42,7 @@ static int vgconvert_single(struct cmd_context *cmd, const char *vg_name,
 	}
 
 	if (cmd->fmt->features & FMT_MDAS) {
-		if (arg_sign_value(cmd, metadatasize_ARG, 0) == SIGN_MINUS) {
+		if (arg_sign_value(cmd, metadatasize_ARG, SIGN_NONE) == SIGN_MINUS) {
 			log_error("Metadata size may not be negative");
 			return EINVALID_CMD_LINE;
 		}
@@ -98,7 +96,7 @@ static int vgconvert_single(struct cmd_context *cmd, const char *vg_name,
 				continue;
 			if (lvnum_from_lvid(&lv->lvid) < MAX_RESTRICTED_LVS)
 				continue;
-			if (lv_info(cmd, lv, &info, 0, 0) && info.exists) {
+			if (lv_info(cmd, lv, 0, &info, 0, 0) && info.exists) {
 				log_error("Logical volume %s must be "
 					  "deactivated before conversion.",
 					   lv->name);
@@ -119,15 +117,15 @@ static int vgconvert_single(struct cmd_context *cmd, const char *vg_name,
 		existing_pv = pvl->pv;
 
 		pe_start = pv_pe_start(existing_pv);
-		pe_end = pv_pe_count(existing_pv) * pv_pe_size(existing_pv)
-		    + pe_start - 1;
+		/* pe_end = pv_pe_count(existing_pv) * pv_pe_size(existing_pv) + pe_start - 1; */
 
-		dm_list_init(&mdas);
 		if (!(pv = pv_create(cmd, pv_dev(existing_pv),
-				     &existing_pv->id, size, 0, 0,
+				     &existing_pv->id, 0, 0, 0,
 				     pe_start, pv_pe_count(existing_pv),
-				     pv_pe_size(existing_pv), pvmetadatacopies,
-				     pvmetadatasize, &mdas))) {
+				     pv_pe_size(existing_pv),
+				     arg_int64_value(cmd, labelsector_ARG,
+						     DEFAULT_LABELSECTOR),
+				     pvmetadatacopies, pvmetadatasize, 0))) {
 			log_error("Failed to setup physical volume \"%s\"",
 				  pv_dev_name(existing_pv));
 			if (change_made)
@@ -153,9 +151,7 @@ static int vgconvert_single(struct cmd_context *cmd, const char *vg_name,
 
 		log_very_verbose("Writing physical volume data to disk \"%s\"",
 				 pv_dev_name(pv));
-		if (!(pv_write(cmd, pv, &mdas,
-			       arg_int64_value(cmd, labelsector_ARG,
-					       DEFAULT_LABELSECTOR)))) {
+		if (!(pv_write(cmd, pv, 0))) {
 			log_error("Failed to write physical volume \"%s\"",
 				  pv_dev_name(pv));
 			log_error("Use pvcreate and vgcfgrestore to repair "
@@ -164,7 +160,6 @@ static int vgconvert_single(struct cmd_context *cmd, const char *vg_name,
 		}
 		log_verbose("Physical volume \"%s\" successfully created",
 			    pv_dev_name(pv));
-
 	}
 
 	log_verbose("Deleting existing metadata for VG %s", vg_name);

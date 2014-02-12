@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2003-2004 Sistina Software, Inc. All rights reserved.  
- * Copyright (C) 2004-2006 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2004-2012 Red Hat, Inc. All rights reserved.
  *
  * This file is part of LVM2.
  *
@@ -14,14 +14,15 @@
  */
 
 #ifndef _LVM_LV_ALLOC_H
+#define _LVM_LV_ALLOC_H
 
-struct lv_segment *alloc_lv_segment(struct dm_pool *mem,
-				    const struct segment_type *segtype,
+struct lv_segment *alloc_lv_segment(const struct segment_type *segtype,
 				    struct logical_volume *lv,
 				    uint32_t le, uint32_t len,
 				    uint64_t status,
 				    uint32_t stripe_size,
 				    struct logical_volume *log_lv,
+				    struct logical_volume *thin_pool_lv,
 				    uint32_t area_count,
 				    uint32_t area_len,
 				    uint32_t chunk_size,
@@ -72,12 +73,13 @@ int lv_add_mirror_lvs(struct logical_volume *lv,
 int lv_add_log_segment(struct alloc_handle *ah, uint32_t first_area,
 		       struct logical_volume *log_lv, uint64_t status);
 int lv_add_virtual_segment(struct logical_volume *lv, uint64_t status,
-                           uint32_t extents, const struct segment_type *segtype);
+                           uint32_t extents,
+			   const struct segment_type *segtype,
+			   const char *thin_pool_name);
 
 void alloc_destroy(struct alloc_handle *ah);
 
-struct dm_list *build_parallel_areas_from_lv(struct cmd_context *cmd,
-					     struct logical_volume *lv,
+struct dm_list *build_parallel_areas_from_lv(struct logical_volume *lv,
 					     unsigned use_pvmove_parent_lv);
 
 #endif

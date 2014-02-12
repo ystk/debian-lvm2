@@ -60,7 +60,7 @@ static char *_list_args(const char *text, int state)
 	/* Initialise if this is a new completion attempt */
 	if (!state) {
 		char *s = rl_line_buffer;
-		int j = 0;
+		int j;
 
 		match_no = 0;
 		com = NULL;
@@ -85,17 +85,17 @@ static char *_list_args(const char *text, int state)
 				break;
 			}
 		}
-
-		if (!com)
-			return NULL;
 	}
+
+	if (!com)
+		return NULL;
 
 	/* Short form arguments */
 	if (len < 3) {
 		while (match_no < com->num_args) {
 			char s[3];
 			char c;
-			if (!(c = (_cmdline->the_args +
+			if (!(c = (_cmdline->arg_props +
 				   com->valid_args[match_no++])->short_arg))
 				continue;
 
@@ -111,7 +111,7 @@ static char *_list_args(const char *text, int state)
 
 	while (match_no - com->num_args < com->num_args) {
 		const char *l;
-		l = (_cmdline->the_args +
+		l = (_cmdline->arg_props +
 		     com->valid_args[match_no++ - com->num_args])->long_arg;
 		if (*(l + 2) && !strncmp(text, l, len))
 			return strdup(l);
@@ -122,7 +122,7 @@ static char *_list_args(const char *text, int state)
 
 /* Custom completion function */
 static char **_completion(const char *text, int start_pos,
-			  int end_pos __attribute((unused)))
+			  int end_pos __attribute__((unused)))
 {
 	char **match_list = NULL;
 	int p = 0;
@@ -167,7 +167,6 @@ static void _read_history(struct cmd_context *cmd)
 
 	stifle_history(find_config_tree_int(cmd, "shell/history_size",
 				       DEFAULT_MAX_HISTORY));
-
 }
 
 static void _write_history(void)
@@ -216,6 +215,9 @@ int lvm_shell(struct cmd_context *cmd, struct cmdline_context *cmdline)
 			log_error("Too many arguments, sorry.");
 			continue;
 		}
+
+		if (!argc)
+			continue;
 
 		if (!strcmp(argv[0], "lvm")) {
 			argv++;
