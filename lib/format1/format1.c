@@ -67,35 +67,35 @@ static int _check_vgs(struct dm_list *pvs, struct volume_group *vg)
 		else if (memcmp(&first->vgd, &dl->vgd, sizeof(first->vgd))) {
 			log_error("VG data differs between PVs %s and %s",
 				  dev_name(first->dev), dev_name(dl->dev));
-			log_debug("VG data on %s: %s %s %" PRIu32 " %" PRIu32
-				  "  %" PRIu32 " %" PRIu32 " %" PRIu32 " %"
-				  PRIu32 " %" PRIu32 " %" PRIu32 " %" PRIu32
-				  " %" PRIu32 " %" PRIu32 " %" PRIu32 " %"
-				  PRIu32 " %" PRIu32 " %" PRIu32,
-				  dev_name(first->dev), first->vgd.vg_uuid,
-				  first->vgd.vg_name_dummy,
-				  first->vgd.vg_number, first->vgd.vg_access,
-				  first->vgd.vg_status, first->vgd.lv_max,
-				  first->vgd.lv_cur, first->vgd.lv_open,
-				  first->vgd.pv_max, first->vgd.pv_cur,
-				  first->vgd.pv_act, first->vgd.dummy,
-				  first->vgd.vgda, first->vgd.pe_size,
-				  first->vgd.pe_total, first->vgd.pe_allocated,
-				  first->vgd.pvg_total);
-			log_debug("VG data on %s: %s %s %" PRIu32 " %" PRIu32
-				  "  %" PRIu32 " %" PRIu32 " %" PRIu32 " %"
-				  PRIu32 " %" PRIu32 " %" PRIu32 " %" PRIu32
-				  " %" PRIu32 " %" PRIu32 " %" PRIu32 " %"
-				  PRIu32 " %" PRIu32 " %" PRIu32,
-				  dev_name(dl->dev), dl->vgd.vg_uuid,
-				  dl->vgd.vg_name_dummy, dl->vgd.vg_number,
-				  dl->vgd.vg_access, dl->vgd.vg_status,
-				  dl->vgd.lv_max, dl->vgd.lv_cur,
-				  dl->vgd.lv_open, dl->vgd.pv_max,
-				  dl->vgd.pv_cur, dl->vgd.pv_act, dl->vgd.dummy,
-				  dl->vgd.vgda, dl->vgd.pe_size,
-				  dl->vgd.pe_total, dl->vgd.pe_allocated,
-				  dl->vgd.pvg_total);
+			log_debug_metadata("VG data on %s: %s %s %" PRIu32 " %" PRIu32
+					   "  %" PRIu32 " %" PRIu32 " %" PRIu32 " %"
+					   PRIu32 " %" PRIu32 " %" PRIu32 " %" PRIu32
+					   " %" PRIu32 " %" PRIu32 " %" PRIu32 " %"
+					   PRIu32 " %" PRIu32 " %" PRIu32,
+					   dev_name(first->dev), first->vgd.vg_uuid,
+					   first->vgd.vg_name_dummy,
+					   first->vgd.vg_number, first->vgd.vg_access,
+					   first->vgd.vg_status, first->vgd.lv_max,
+					   first->vgd.lv_cur, first->vgd.lv_open,
+					   first->vgd.pv_max, first->vgd.pv_cur,
+					   first->vgd.pv_act, first->vgd.dummy,
+					   first->vgd.vgda, first->vgd.pe_size,
+					   first->vgd.pe_total, first->vgd.pe_allocated,
+					   first->vgd.pvg_total);
+			log_debug_metadata("VG data on %s: %s %s %" PRIu32 " %" PRIu32
+					   "  %" PRIu32 " %" PRIu32 " %" PRIu32 " %"
+					   PRIu32 " %" PRIu32 " %" PRIu32 " %" PRIu32
+					   " %" PRIu32 " %" PRIu32 " %" PRIu32 " %"
+					   PRIu32 " %" PRIu32 " %" PRIu32,
+					   dev_name(dl->dev), dl->vgd.vg_uuid,
+					   dl->vgd.vg_name_dummy, dl->vgd.vg_number,
+					   dl->vgd.vg_access, dl->vgd.vg_status,
+					   dl->vgd.lv_max, dl->vgd.lv_cur,
+					   dl->vgd.lv_open, dl->vgd.pv_max,
+					   dl->vgd.pv_cur, dl->vgd.pv_act, dl->vgd.dummy,
+					   dl->vgd.vgda, dl->vgd.pe_size,
+					   dl->vgd.pe_total, dl->vgd.pe_allocated,
+					   dl->vgd.pvg_total);
 			dm_list_del(pvh);
 			return 0;
 		}
@@ -168,8 +168,8 @@ static int _fix_partial_vg(struct volume_group *vg, struct dm_list *pvs)
 		goto_out;
 
 	add_pvl_to_vgs(vg, pvl);
-	log_debug("%s: partial VG, allocated missing PV using %d extents.",
-		  vg->name, pvl->pv->pe_count);
+	log_debug_metadata("%s: partial VG, allocated missing PV using %d extents.",
+			   vg->name, pvl->pv->pe_count);
 
 	return 1;
 out:
@@ -200,8 +200,6 @@ static struct volume_group *_format1_vg_read(struct format_instance *fid,
 	if (dm_list_empty(&pvs))
 		goto_bad;
 
-	vg_set_fid(vg, fid);
-
 	if (!_check_vgs(&pvs, vg))
 		goto_bad;
 
@@ -219,12 +217,19 @@ static struct volume_group *_format1_vg_read(struct format_instance *fid,
 	if (!import_extents(fid->fmt->cmd, vg, &pvs))
 		goto_bad;
 
-	if (!import_snapshots(vg->vgmem, vg, &pvs))
+	/* FIXME: workaround - temporary assignment of fid */
+	vg->fid = fid;
+	if (!import_snapshots(vg->vgmem, vg, &pvs)) {
+		vg->fid = NULL;
 		goto_bad;
+	}
+	vg->fid = NULL;
 
 	/* Fix extents counts by adding missing PV if partial VG */
 	if ((vg->status & PARTIAL_VG) && !_fix_partial_vg(vg, &pvs))
 		goto_bad;
+
+	vg_set_fid(vg, fid);
 
 	return vg;
 
@@ -299,7 +304,7 @@ static int _format1_vg_write(struct format_instance *fid, struct volume_group *v
 
 	r = (_flatten_vg(fid, mem, vg, &pvds, fid->fmt->cmd->dev_dir,
 			 fid->fmt->cmd->filter) &&
-	     write_disks(fid->fmt, &pvds));
+	     write_disks(fid->fmt, &pvds, 1));
 
 	lvmcache_update_vg(vg, 0);
 	dm_pool_destroy(mem);
@@ -339,11 +344,9 @@ static int _format1_pv_read(const struct format_type *fmt, const char *pv_name,
 
 static int _format1_pv_initialise(const struct format_type * fmt,
 				  int64_t label_sector __attribute__((unused)),
-				  uint64_t pe_start,
-				  uint32_t extent_count,
-				  uint32_t extent_size,
 				  unsigned long data_alignment __attribute__((unused)),
 				  unsigned long data_alignment_offset __attribute__((unused)),
+				  struct pvcreate_restorable_params *rp,
 				  struct physical_volume * pv)
 {
 	if (pv->size > MAX_PV_SIZE)
@@ -355,18 +358,18 @@ static int _format1_pv_initialise(const struct format_type * fmt,
 	}
 
 	/* Nothing more to do if extent size isn't provided */
-	if (!extent_size)
+	if (!rp->extent_size)
 		return 1;
 
 	/*
 	 * This works out pe_start and pe_count.
 	 */
-	if (!calculate_extent_count(pv, extent_size, extent_count, pe_start))
+	if (!calculate_extent_count(pv, rp->extent_size, rp->extent_count, rp->pe_start))
 		return_0;
 
 	/* Retain existing extent locations exactly */
-	if (((pe_start || extent_count) && (pe_start != pv->pe_start)) ||
-	    (extent_count && (extent_count != pv->pe_count))) {
+	if (((rp->pe_start || rp->extent_count) && (rp->pe_start != pv->pe_start)) ||
+	    (rp->extent_count && (rp->extent_count != pv->pe_count))) {
 		log_error("Metadata would overwrite physical extents");
 		return 0;
 	}
@@ -378,7 +381,20 @@ static int _format1_pv_setup(const struct format_type *fmt,
 			     struct physical_volume *pv,
 			     struct volume_group *vg)
 {
-	return _format1_pv_initialise(fmt, -1, 0, 0, vg->extent_size, 0, 0, pv);
+	int r;
+	struct pvcreate_restorable_params rp = {.restorefile = NULL,
+						.id = {{0}},
+						.idp = NULL,
+						.ba_start = 0,
+						.ba_size = 0,
+						.pe_start = 0,
+						.extent_count = 0,
+						.extent_size = vg->extent_size};
+
+	if ((r = _format1_pv_initialise(fmt, -1, 0, 0, &rp, pv)))
+		pv->status |= ALLOCATABLE_PV;
+
+	return r;
 }
 
 static int _format1_lv_setup(struct format_instance *fid, struct logical_volume *lv)
@@ -418,6 +434,7 @@ static int _format1_pv_write(const struct format_type *fmt, struct physical_volu
 	lvmcache_update_pv(info, pv, fmt);
 	lvmcache_del_mdas(info);
 	lvmcache_del_das(info);
+	lvmcache_del_bas(info);
 
 	dm_list_init(&pvs);
 
@@ -450,7 +467,7 @@ static int _format1_pv_write(const struct format_type *fmt, struct physical_volu
 	dl->pvd.pe_on_disk.base = LVM1_PE_ALIGN << SECTOR_SHIFT;
 
 	dm_list_add(&pvs, &dl->list);
-	if (!write_disks(fmt, &pvs))
+	if (!write_disks(fmt, &pvs, 0))
 		goto_bad;
 
 	goto out;
@@ -590,7 +607,7 @@ struct format_type *init_format(struct cmd_context *cmd)
 	fmt->alias = NULL;
 	fmt->orphan_vg_name = FMT_LVM1_ORPHAN_VG_NAME;
 	fmt->features = FMT_RESTRICTED_LVIDS | FMT_ORPHAN_ALLOCATABLE |
-			FMT_RESTRICTED_READAHEAD;
+			FMT_RESTRICTED_READAHEAD | FMT_OBSOLETE;
 	fmt->private = NULL;
 
 	dm_list_init(&fmt->mda_ops);
@@ -601,7 +618,7 @@ struct format_type *init_format(struct cmd_context *cmd)
 		return NULL;
 	}
 
-	if (!(label_register_handler(FMT_LVM1_NAME, fmt->labeller))) {
+	if (!(label_register_handler(fmt->labeller))) {
 		log_error("Couldn't register lvm1 label handler.");
 		fmt->labeller->ops->destroy(fmt->labeller);
 		dm_free(fmt);

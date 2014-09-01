@@ -89,7 +89,7 @@ quorum_callbacks_t quorum_callbacks = {
 
 struct node_info
 {
-	enum {NODE_UNKNOWN, NODE_DOWN, NODE_UP, NODE_CLVMD} state;
+	enum {NODE_DOWN, NODE_CLVMD} state;
 	int nodeid;
 };
 
@@ -255,26 +255,6 @@ static void corosync_cpg_confchg_callback(cpg_handle_t handle,
 			ninfo->state = NODE_DOWN;
 	}
 
-	for (i=0; i<member_list_entries; i++) {
-		if (member_list[i].nodeid == 0) continue;
-		ninfo = dm_hash_lookup_binary(node_hash,
-				(char *)&member_list[i].nodeid,
-				COROSYNC_CSID_LEN);
-		if (!ninfo) {
-			ninfo = malloc(sizeof(struct node_info));
-			if (!ninfo) {
-				break;
-			}
-			else {
-				ninfo->nodeid = member_list[i].nodeid;
-				dm_hash_insert_binary(node_hash,
-						(char *)&ninfo->nodeid,
-						COROSYNC_CSID_LEN, ninfo);
-			}
-		}
-		ninfo->state = NODE_CLVMD;
-	}
-
 	num_nodes = member_list_entries;
 }
 
@@ -365,9 +345,6 @@ static int _init_cluster(void)
 
 static void _cluster_closedown(void)
 {
-	DEBUGLOG("cluster_closedown\n");
-	destroy_lvhash();
-
 	dlm_release_lockspace(LOCKSPACE_NAME, lockspace, 1);
 	cpg_finalize(cpg_handle);
 	quorum_finalize(quorum_handle);
@@ -408,7 +385,7 @@ static int _name_from_csid(const char *csid, char *name)
 	return 0;
 }
 
-static int _get_num_nodes()
+static int _get_num_nodes(void)
 {
 	DEBUGLOG("num_nodes = %d\n", num_nodes);
 	return num_nodes;
@@ -440,7 +417,6 @@ static int _cluster_do_node_callback(struct local_client *master_client,
 {
 	struct dm_hash_node *hn;
 	struct node_info *ninfo;
-	int somedown = 0;
 
 	dm_hash_iterate(hn, node_hash)
 	{
@@ -452,12 +428,10 @@ static int _cluster_do_node_callback(struct local_client *master_client,
 		DEBUGLOG("down_callback. node %d, state = %d\n", ninfo->nodeid,
 			 ninfo->state);
 
-		if (ninfo->state != NODE_DOWN)
-			callback(master_client, csid, ninfo->state == NODE_CLVMD);
-		if (ninfo->state != NODE_CLVMD)
-			somedown = -1;
+		if (ninfo->state == NODE_CLVMD)
+			callback(master_client, csid, 1);
 	}
-	return somedown;
+	return 0;
 }
 
 /* Real locking */
@@ -528,7 +502,7 @@ static int _unlock_resource(const char *resource, int lockid)
 	return 0;
 }
 
-static int _is_quorate()
+static int _is_quorate(void)
 {
 	int quorate;
 	if (quorum_getquorate(quorum_handle, &quorate) == CS_OK)

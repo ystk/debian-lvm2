@@ -19,6 +19,7 @@
 #include "activate.h"
 #include "toolcontext.h"
 #include "lvmcache.h"
+#include "archiver.h"
 
 struct volume_group *alloc_vg(const char *pool_name, struct cmd_context *cmd,
 			      const char *vg_name)
@@ -56,7 +57,7 @@ struct volume_group *alloc_vg(const char *pool_name, struct cmd_context *cmd,
 	dm_list_init(&vg->tags);
 	dm_list_init(&vg->removed_pvs);
 
-	log_debug("Allocated VG %s at %p.", vg->name, vg);
+	log_debug_mem("Allocated VG %s at %p.", vg->name, vg);
 
 	return vg;
 }
@@ -71,7 +72,7 @@ static void _free_vg(struct volume_group *vg)
 		return;
 	}
 
-	log_debug("Freeing VG %s at %p.", vg->name, vg);
+	log_debug_mem("Freeing VG %s at %p.", vg->name, vg);
 
 	dm_hash_destroy(vg->hostnames);
 	dm_pool_destroy(vg->vgmem);
@@ -87,6 +88,10 @@ void release_vg(struct volume_group *vg)
 	    !lvmcache_vginfo_holders_dec_and_test_for_zero(vg->vginfo))
 		return;
 
+	release_vg(vg->vg_ondisk);
+	release_vg(vg->vg_precommitted);
+	if (vg->cft_precommitted)
+		dm_config_destroy(vg->cft_precommitted);
 	_free_vg(vg);
 }
 
@@ -260,10 +265,16 @@ int vg_set_mda_copies(struct volume_group *vg, uint32_t mda_copies)
 	vg->mda_copies = mda_copies;
 
 	/* FIXME Use log_verbose when this is due to specific cmdline request. */
-	log_debug("Setting mda_copies to %"PRIu32" for VG %s",
-		    mda_copies, vg->name);
+	log_debug_metadata("Setting mda_copies to %"PRIu32" for VG %s",
+			   mda_copies, vg->name);
 
 	return 1;
+}
+
+char *vg_profile_dup(const struct volume_group *vg)
+{
+	const char *profile_name = vg->profile ? vg->profile->name : "";
+	return dm_pool_strdup(vg->vgmem, profile_name);
 }
 
 static int _recalc_extents(uint32_t *extents, const char *desc1,
@@ -514,12 +525,14 @@ int vg_set_clustered(struct volume_group *vg, int clustered)
 
 	/*
 	 * We do not currently support switching the cluster attribute
-	 * on active mirrors or snapshots.
+	 * on active mirrors, snapshots or RAID logical volumes.
 	 */
 	dm_list_iterate_items(lvl, &vg->lvs) {
-		if (lv_is_mirrored(lvl->lv) && lv_is_active(lvl->lv)) {
-			log_error("Mirror logical volumes must be inactive "
-				  "when changing the cluster attribute.");
+		if (lv_is_active(lvl->lv) &&
+		    (lv_is_mirrored(lvl->lv) || lv_is_raid_type(lvl->lv))) {
+			log_error("%s logical volumes must be inactive "
+				  "when changing the cluster attribute.",
+				  lv_is_raid_type(lvl->lv) ? "RAID" : "Mirror");
 			return 0;
 		}
 
@@ -563,4 +576,97 @@ char *vg_attr_dup(struct dm_pool *mem, const struct volume_group *vg)
 	repstr[4] = alloc_policy_char(vg->alloc);
 	repstr[5] = (vg_is_clustered(vg)) ? 'c' : '-';
 	return repstr;
+}
+
+int vgreduce_single(struct cmd_context *cmd, struct volume_group *vg,
+			    struct physical_volume *pv, int commit)
+{
+	struct pv_list *pvl;
+	struct volume_group *orphan_vg = NULL;
+	int r = 0;
+	const char *name = pv_dev_name(pv);
+
+	if (!vg) {
+		log_error(INTERNAL_ERROR "VG is NULL.");
+		return r;
+	}
+
+	if (pv_pe_alloc_count(pv)) {
+		log_error("Physical volume \"%s\" still in use", name);
+		return r;
+	}
+
+	if (vg->pv_count == 1) {
+		log_error("Can't remove final physical volume \"%s\" from "
+			  "volume group \"%s\"", name, vg->name);
+		return r;
+	}
+
+	if (!lock_vol(cmd, VG_ORPHANS, LCK_VG_WRITE, NULL)) {
+		log_error("Can't get lock for orphan PVs");
+		return r;
+	}
+
+	pvl = find_pv_in_vg(vg, name);
+
+	if (!archive(vg))
+		goto_bad;
+
+	log_verbose("Removing \"%s\" from volume group \"%s\"", name, vg->name);
+
+	if (pvl)
+		del_pvl_from_vgs(vg, pvl);
+
+	pv->vg_name = vg->fid->fmt->orphan_vg_name;
+	pv->status = ALLOCATABLE_PV;
+
+	if (!dev_get_size(pv_dev(pv), &pv->size)) {
+		log_error("%s: Couldn't get size.", pv_dev_name(pv));
+		goto bad;
+	}
+
+	vg->free_count -= pv_pe_count(pv) - pv_pe_alloc_count(pv);
+	vg->extent_count -= pv_pe_count(pv);
+
+	orphan_vg = vg_read_for_update(cmd, vg->fid->fmt->orphan_vg_name,
+				       NULL, 0);
+
+	if (vg_read_error(orphan_vg))
+		goto bad;
+
+	if (!vg_split_mdas(cmd, vg, orphan_vg) || !vg->pv_count) {
+		log_error("Cannot remove final metadata area on \"%s\" from \"%s\"",
+			  name, vg->name);
+		goto bad;
+	}
+
+	/*
+	 * Only write out the needed changes if so requested by caller.
+	 */
+	if (commit) {
+		if (!vg_write(vg) || !vg_commit(vg)) {
+			log_error("Removal of physical volume \"%s\" from "
+				  "\"%s\" failed", name, vg->name);
+			goto bad;
+		}
+
+		if (!pv_write(cmd, pv, 0)) {
+			log_error("Failed to clear metadata from physical "
+				  "volume \"%s\" "
+				  "after removal from \"%s\"", name, vg->name);
+			goto bad;
+		}
+
+		backup(vg);
+
+		log_print_unless_silent("Removed \"%s\" from volume group \"%s\"",
+				name, vg->name);
+	}
+	r = 1;
+bad:
+	/* If we are committing here or we had an error then we will free fid */
+	if (pvl && (commit || r != 1))
+		free_pv_fid(pvl->pv);
+	unlock_and_release_vg(cmd, orphan_vg, VG_ORPHANS);
+	return r;
 }

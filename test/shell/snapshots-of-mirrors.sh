@@ -1,3 +1,4 @@
+#!/bin/sh
 # Copyright (C) 2010 Red Hat, Inc. All rights reserved.
 #
 # This copyrighted material is made available to anyone wishing to use,
@@ -8,22 +9,23 @@
 # along with this program; if not, write to the Free Software Foundation,
 # Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
-. lib/test
+. lib/inittest
 
 aux prepare_vg 4
 
+lvcreate -aey --type mirror -m 1 -L 10M --nosync -n lv $vg
+
 # Create snapshot of a mirror origin
-lvcreate -m 1 -L 10M -n lv $vg
 lvcreate -s $vg/lv -L 10M -n snap
 
 # Down-convert (mirror -> linear) under a snapshot
 lvconvert -m0 $vg/lv
 
 # Up-convert (linear -> mirror)
-lvconvert -m2 $vg/lv
+lvconvert --type mirror -m2 $vg/lv
 
 # Down-convert (mirror -> mirror)
-lvconvert -m1 $vg/lv
+lvconvert -m 1 $vg/lv
 
 # Up-convert (mirror -> mirror) -- Not supported!
 not lvconvert -m2 $vg/lv
@@ -32,7 +34,9 @@ not lvconvert -m2 $vg/lv
 lvconvert --mirrorlog core $vg/lv
 
 # Log conversion (core -> mirrored)
-lvconvert --mirrorlog mirrored $vg/lv
+# FIXME on cluster
+test -e LOCAL_CLVMD && SHOULD=should
+$SHOULD lvconvert --mirrorlog mirrored $vg/lv
 
 # Log conversion (mirrored -> core)
 lvconvert --mirrorlog core $vg/lv
@@ -40,5 +44,5 @@ lvconvert --mirrorlog core $vg/lv
 # Log conversion (core -> disk)
 lvconvert --mirrorlog disk $vg/lv
 
-# Clean-up
-lvremove -ff $vg
+## Clean-up
+vgremove -f $vg

@@ -14,8 +14,6 @@
 
 #include "lib.h"
 
-#include "lvm2cmd.h"
-#include "errors.h"
 #include "libdevmapper-event.h"
 #include "dmeventd_lvm.h"
 #include "defaults.h"
@@ -124,7 +122,7 @@ static int _get_mirror_event(char *params)
 out:
 	dm_free(args);
 	return r;
-	
+
 out_parse:
 	dm_free(args);
 	syslog(LOG_ERR, "Unable to parse mirror status string.");
@@ -145,9 +143,9 @@ static int _remove_failed_devices(const char *device)
 	r = dmeventd_lvm2_run(cmd_str);
 
 	syslog(LOG_INFO, "Repair of mirrored device %s %s.", device,
-	       (r == ECMD_PROCESSED) ? "finished successfully" : "failed");
+	       (r) ? "finished successfully" : "failed");
 
-	return (r == ECMD_PROCESSED) ? 0 : -1;
+	return (r) ? 0 : -1;
 }
 
 void process_event(struct dm_task *dmt,

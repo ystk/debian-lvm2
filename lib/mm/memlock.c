@@ -82,20 +82,29 @@ static int _default_priority;
 
 /* list of maps, that are unconditionaly ignored */
 static const char * const _ignore_maps[] = {
-    "[vdso]",
-    "[vsyscall]",
+	"[vdso]",
+	"[vsyscall]",
+	"[vectors]",
 };
 
 /* default blacklist for maps */
 static const char * const _blacklist_maps[] = {
-    "locale/locale-archive",
-    "/LC_MESSAGES/",
-    "gconv/gconv-modules.cache",
-    "/libreadline.so.",	/* not using readline during mlock */
-    "/libncurses.so.",	/* not using readline during mlock */
-    "/libtinfo.so.",	/* not using readline during mlock */
-    "/libdl-",		/* not using dlopen,dlsym during mlock */
-    /* "/libdevmapper-event.so" */
+	"locale/locale-archive",
+	"/LC_MESSAGES/",
+	"gconv/gconv-modules.cache",
+	"/libblkid.so.",	/* not using lzma during mlock (selinux) */
+	"/liblzma.so.",	/* not using lzma during mlock (selinux) */
+	"/libncurses.so.",	/* not using ncurses during mlock */
+	"/libpcre.so.",	/* not using pcre during mlock (selinux) */
+	"/libreadline.so.",	/* not using readline during mlock */
+	"/libselinux.so.",	/* not using selinux during mlock */
+	"/libsepol.so.",	/* not using sepol during mlock */
+	"/libtinfo.so.",	/* not using tinfo during mlock */
+	"/libudev.so.",		/* not using udev during mlock */
+	"/libuuid.so.",		/* not using uuid during mlock (blkid) */
+	"/libdl-",		/* not using dlopen,dlsym during mlock */
+	"/etc/selinux",		/* not using selinux during mlock */
+	/* "/libdevmapper-event.so" */
 };
 
 typedef enum { LVM_MLOCK, LVM_MUNLOCK } lvmlock_t;
@@ -124,9 +133,14 @@ static void _touch_memory(void *mem, size_t size)
 static void _allocate_memory(void)
 {
 	void *stack_mem, *temp_malloc_mem;
+	struct rlimit limit;
 
-	if ((stack_mem = alloca(_size_stack)))
+	/* Check if we could preallocate requested stack */
+	if ((getrlimit (RLIMIT_STACK, &limit) == 0) &&
+	    ((_size_stack * 2) < limit.rlim_cur) &&
+	    ((stack_mem = alloca(_size_stack))))
 		_touch_memory(stack_mem, _size_stack);
+	/* FIXME else warn user setting got ignored */
 
 	if ((temp_malloc_mem = malloc(_size_malloc_tmp)))
 		_touch_memory(temp_malloc_mem, _size_malloc_tmp);
@@ -165,25 +179,25 @@ static int _maps_line(const struct dm_config_node *cn, lvmlock_t lock,
 
 	/* Select readable maps */
 	if (fr != 'r') {
-		log_debug("%s area unreadable %s : Skipping.", lock_str, line);
+		log_debug_mem("%s area unreadable %s : Skipping.", lock_str, line);
 		return 1;
 	}
 
 	/* always ignored areas */
-	for (i = 0; i < sizeof(_ignore_maps) / sizeof(_ignore_maps[0]); ++i)
+	for (i = 0; i < DM_ARRAY_SIZE(_ignore_maps); ++i)
 		if (strstr(line + pos, _ignore_maps[i])) {
-			log_debug("%s ignore filter '%s' matches '%s': Skipping.",
-				  lock_str, _ignore_maps[i], line);
+			log_debug_mem("%s ignore filter '%s' matches '%s': Skipping.",
+				      lock_str, _ignore_maps[i], line);
 			return 1;
 		}
 
 	sz = to - from;
 	if (!cn) {
 		/* If no blacklist configured, use an internal set */
-		for (i = 0; i < sizeof(_blacklist_maps) / sizeof(_blacklist_maps[0]); ++i)
+		for (i = 0; i < DM_ARRAY_SIZE(_blacklist_maps); ++i)
 			if (strstr(line + pos, _blacklist_maps[i])) {
-				log_debug("%s default filter '%s' matches '%s': Skipping.",
-					  lock_str, _blacklist_maps[i], line);
+				log_debug_mem("%s default filter '%s' matches '%s': Skipping.",
+					      lock_str, _blacklist_maps[i], line);
 				return 1;
 			}
 	} else {
@@ -191,8 +205,8 @@ static int _maps_line(const struct dm_config_node *cn, lvmlock_t lock,
 			if ((cv->type != DM_CFG_STRING) || !cv->v.str[0])
 				continue;
 			if (strstr(line + pos, cv->v.str)) {
-				log_debug("%s_filter '%s' matches '%s': Skipping.",
-					  lock_str, cv->v.str, line);
+				log_debug_mem("%s_filter '%s' matches '%s': Skipping.",
+					      lock_str, cv->v.str, line);
 				return 1;
 			}
 		}
@@ -207,8 +221,8 @@ static int _maps_line(const struct dm_config_node *cn, lvmlock_t lock,
 
 #endif
 	*mstats += sz;
-	log_debug("%s %10ldKiB %12lx - %12lx %c%c%c%c%s", lock_str,
-		  ((long)sz + 1023) / 1024, from, to, fr, fw, fx, fp, line + pos);
+	log_debug_mem("%s %10ldKiB %12lx - %12lx %c%c%c%c%s", lock_str,
+		      ((long)sz + 1023) / 1024, from, to, fr, fw, fx, fp, line + pos);
 
 	if (lock == LVM_MLOCK) {
 		if (mlock((const void*)from, sz) < 0) {
@@ -264,27 +278,30 @@ static int _memlock_maps(struct cmd_context *cmd, lvmlock_t lock, size_t *mstats
 		if (!_maps_buffer || len >= _maps_len) {
 			if (_maps_buffer)
 				_maps_len *= 2;
-			if (!(_maps_buffer = dm_realloc(_maps_buffer, _maps_len))) {
-				log_error("Allocation of maps buffer failed");
+			if (!(line = dm_realloc(_maps_buffer, _maps_len))) {
+				log_error("Allocation of maps buffer failed.");
 				return 0;
 			}
+			_maps_buffer = line;
 		}
 		if (lseek(_maps_fd, 0, SEEK_SET))
 			log_sys_error("lseek", _procselfmaps);
 		for (len = 0 ; len < _maps_len; len += n) {
-			if (!(n = read(_maps_fd, _maps_buffer + len, _maps_len - len))) {
-				_maps_buffer[len] = '\0';
+			if (!(n = read(_maps_fd, _maps_buffer + len, _maps_len - len)))
 				break; /* EOF */
+			if (n == -1) {
+				log_sys_error("read", _procselfmaps);
+				return 0;
 			}
-			if (n == -1)
-				return_0;
 		}
-		if (len < _maps_len)  /* fits in buffer */
+		if (len < _maps_len) { /* fits in buffer */
+			_maps_buffer[len] = '\0';
 			break;
+		}
 	}
 
 	line = _maps_buffer;
-	cn = find_config_tree_node(cmd, "activation/mlock_filter");
+	cn = find_config_tree_node(cmd, activation_mlock_filter_CFG, NULL);
 
 	while ((line_end = strchr(line, '\n'))) {
 		*line_end = '\0'; /* remove \n */
@@ -293,8 +310,8 @@ static int _memlock_maps(struct cmd_context *cmd, lvmlock_t lock, size_t *mstats
 		line = line_end + 1;
 	}
 
-	log_debug("%socked %ld bytes",
-		  (lock == LVM_MLOCK) ? "L" : "Unl", (long)*mstats);
+	log_debug_mem("%socked %ld bytes",
+		      (lock == LVM_MLOCK) ? "L" : "Unl", (long)*mstats);
 
 	return ret;
 }
@@ -309,9 +326,9 @@ static void _lock_mem(struct cmd_context *cmd)
 	 * so even future adition of thread which may not even use lvm lib
 	 * will not block memory locked thread
 	 * Note: assuming _memlock_count_daemon is updated before _memlock_count
-         */
+	 */
 	_use_mlockall = _memlock_count_daemon ? 1 :
-		find_config_tree_bool(cmd, "activation/use_mlockall", DEFAULT_USE_MLOCKALL);
+		find_config_tree_bool(cmd, activation_use_mlockall_CFG, NULL);
 
 	if (!_use_mlockall) {
 		if (!*_procselfmaps &&
@@ -361,8 +378,8 @@ static void _unlock_mem(struct cmd_context *cmd)
 					  (long)_mstats, (long)unlock_mstats);
 			else
 				/* FIXME Believed due to incorrect use of yes_no_prompt while locks held */
-				log_debug("Suppressed internal error: Maps lock %ld < unlock %ld, a one-page difference.",
-					  (long)_mstats, (long)unlock_mstats);
+				log_debug_mem("Suppressed internal error: Maps lock %ld < unlock %ld, a one-page difference.",
+					      (long)_mstats, (long)unlock_mstats);
 		}
 	}
 
@@ -374,8 +391,8 @@ static void _unlock_mem(struct cmd_context *cmd)
 
 static void _lock_mem_if_needed(struct cmd_context *cmd)
 {
-	log_debug("Lock:   Memlock counters: locked:%d critical:%d daemon:%d suspended:%d",
-		  _mem_locked, _critical_section, _memlock_count_daemon, dm_get_suspended_counter());
+	log_debug_mem("Lock:   Memlock counters: locked:%d critical:%d daemon:%d suspended:%d",
+		      _mem_locked, _critical_section, _memlock_count_daemon, dm_get_suspended_counter());
 	if (!_mem_locked &&
 	    ((_critical_section + _memlock_count_daemon) == 1)) {
 		_mem_locked = 1;
@@ -385,8 +402,8 @@ static void _lock_mem_if_needed(struct cmd_context *cmd)
 
 static void _unlock_mem_if_possible(struct cmd_context *cmd)
 {
-	log_debug("Unlock: Memlock counters: locked:%d critical:%d daemon:%d suspended:%d",
-		  _mem_locked, _critical_section, _memlock_count_daemon, dm_get_suspended_counter());
+	log_debug_mem("Unlock: Memlock counters: locked:%d critical:%d daemon:%d suspended:%d",
+		      _mem_locked, _critical_section, _memlock_count_daemon, dm_get_suspended_counter());
 	if (_mem_locked &&
 	    !_critical_section &&
 	    !_memlock_count_daemon) {
@@ -397,9 +414,16 @@ static void _unlock_mem_if_possible(struct cmd_context *cmd)
 
 void critical_section_inc(struct cmd_context *cmd, const char *reason)
 {
+	/*
+	 * Profiles are loaded on-demand so make sure that before
+	 * entering the critical section all needed profiles are
+	 * loaded to avoid the disk access later.
+	 */
+	(void) load_pending_profiles(cmd);
+
 	if (!_critical_section) {
 		_critical_section = 1;
-		log_debug("Entering critical section (%s).", reason);
+		log_debug_mem("Entering critical section (%s).", reason);
 	}
 
 	_lock_mem_if_needed(cmd);
@@ -409,7 +433,7 @@ void critical_section_dec(struct cmd_context *cmd, const char *reason)
 {
 	if (_critical_section && !dm_get_suspended_counter()) {
 		_critical_section = 0;
-		log_debug("Leaving critical section (%s).", reason);
+		log_debug_mem("Leaving critical section (%s).", reason);
 	}
 }
 
@@ -429,8 +453,8 @@ void memlock_inc_daemon(struct cmd_context *cmd)
 {
 	++_memlock_count_daemon;
 	if (_memlock_count_daemon == 1 && _critical_section > 0)
-                log_error(INTERNAL_ERROR "_memlock_inc_daemon used in critical section.");
-	log_debug("memlock_count_daemon inc to %d", _memlock_count_daemon);
+		log_error(INTERNAL_ERROR "_memlock_inc_daemon used in critical section.");
+	log_debug_mem("memlock_count_daemon inc to %d", _memlock_count_daemon);
 	_lock_mem_if_needed(cmd);
 }
 
@@ -439,27 +463,27 @@ void memlock_dec_daemon(struct cmd_context *cmd)
 	if (!_memlock_count_daemon)
 		log_error(INTERNAL_ERROR "_memlock_count_daemon has dropped below 0.");
 	--_memlock_count_daemon;
-	log_debug("memlock_count_daemon dec to %d", _memlock_count_daemon);
+	log_debug_mem("memlock_count_daemon dec to %d", _memlock_count_daemon);
+	if (!_memlock_count_daemon && _critical_section && _mem_locked) {
+		log_error("Unlocking daemon memory in critical section.");
+		_unlock_mem(cmd);
+		_mem_locked = 0;
+	}
 	_unlock_mem_if_possible(cmd);
 }
 
 void memlock_init(struct cmd_context *cmd)
 {
 	/* When threaded, caller already limited stack size so just use the default. */
-	_size_stack = 1024 * (cmd->threaded ? DEFAULT_RESERVED_STACK :
-					      find_config_tree_int(cmd, "activation/reserved_stack",
-								   DEFAULT_RESERVED_STACK));
-	_size_malloc_tmp = find_config_tree_int(cmd,
-					   "activation/reserved_memory",
-					   DEFAULT_RESERVED_MEMORY) * 1024;
-	_default_priority = find_config_tree_int(cmd,
-					    "activation/process_priority",
-					    DEFAULT_PROCESS_PRIORITY);
+	_size_stack = 1024ULL * (cmd->threaded ? DEFAULT_RESERVED_STACK :
+				 find_config_tree_int(cmd, activation_reserved_stack_CFG, NULL));
+	_size_malloc_tmp = find_config_tree_int(cmd, activation_reserved_memory_CFG, NULL) * 1024ULL;
+	_default_priority = find_config_tree_int(cmd, activation_process_priority_CFG, NULL);
 }
 
 void memlock_reset(void)
 {
-	log_debug("memlock reset.");
+	log_debug_mem("memlock reset.");
 	_mem_locked = 0;
 	_critical_section = 0;
 	_memlock_count_daemon = 0;

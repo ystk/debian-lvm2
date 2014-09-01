@@ -14,8 +14,7 @@
  */
 
 #include "lib.h"
-#include "filter-regex.h"
-#include "device.h"
+#include "filter.h"
 
 struct rfilter {
 	struct dm_pool *mem;
@@ -150,7 +149,7 @@ static int _accept_p(struct dev_filter *f, struct device *dev)
 {
 	int m, first = 1, rejected = 0;
 	struct rfilter *rf = (struct rfilter *) f->private;
-	struct str_list *sl;
+	struct dm_str_list *sl;
 
 	dm_list_iterate_items(sl, &dev->aliases) {
 		m = dm_regex_match(rf->engine, sl->str);
@@ -170,7 +169,7 @@ static int _accept_p(struct dev_filter *f, struct device *dev)
 	}
 
 	if (rejected)
-		log_debug("%s: Skipping (regex)", dev_name(dev));
+		log_debug_devs("%s: Skipping (regex)", dev_name(dev));
 
 	/*
 	 * pass everything that doesn't match
@@ -213,6 +212,9 @@ struct dev_filter *regex_filter_create(const struct dm_config_value *patterns)
 	f->destroy = _regex_destroy;
 	f->use_count = 0;
 	f->private = rf;
+
+	log_debug_devs("Regex filter initialised.");
+
 	return f;
 
       bad:

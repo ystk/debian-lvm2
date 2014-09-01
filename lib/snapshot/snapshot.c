@@ -14,14 +14,16 @@
  */
 
 #include "lib.h"
-#include "toolcontext.h"
 #include "metadata.h"
 #include "segtype.h"
 #include "text_export.h"
 #include "config.h"
 #include "activate.h"
 #include "str_list.h"
-#include "defaults.h"
+
+#define SEG_LOG_ERROR(t, p...) \
+	log_error(t " segment %s of logical volume %s.", ## p, \
+		  dm_config_parent_name(sn), seg->lv->name), 0;
 
 static const char *_snap_name(const struct lv_segment *seg)
 {
@@ -41,50 +43,45 @@ static int _snap_text_import(struct lv_segment *seg, const struct dm_config_node
 			struct dm_hash_table *pv_hash __attribute__((unused)))
 {
 	uint32_t chunk_size;
-	const char *org_name, *cow_name;
 	struct logical_volume *org, *cow;
-	int old_suppress, merge = 0;
+	const char *org_name = NULL, *cow_name = NULL;
+	int merge = 0;
 
 	if (!dm_config_get_uint32(sn, "chunk_size", &chunk_size)) {
 		log_error("Couldn't read chunk size for snapshot.");
 		return 0;
 	}
 
-	old_suppress = log_suppress(1);
-
-	if ((cow_name = dm_config_find_str(sn, "merging_store", NULL))) {
-		if (dm_config_find_str(sn, "cow_store", NULL)) {
-			log_suppress(old_suppress);
-			log_error("Both snapshot cow and merging storage were specified.");
-			return 0;
-		}
+	if (dm_config_has_node(sn, "merging_store")) {
+		if (!(cow_name = dm_config_find_str(sn, "merging_store", NULL)))
+			return SEG_LOG_ERROR("Merging store must be a string in");
 		merge = 1;
 	}
-	else if (!(cow_name = dm_config_find_str(sn, "cow_store", NULL))) {
-		log_suppress(old_suppress);
-		log_error("Snapshot cow storage not specified.");
-		return 0;
+
+	if (dm_config_has_node(sn, "cow_store")) {
+		if (cow_name)
+			return SEG_LOG_ERROR("Both snapshot cow and merging storage were specified in");
+
+		if (!(cow_name = dm_config_find_str(sn, "cow_store", NULL)))
+			return SEG_LOG_ERROR("Cow store must be a string in");
 	}
 
-	if (!(org_name = dm_config_find_str(sn, "origin", NULL))) {
-		log_suppress(old_suppress);
-		log_error("Snapshot origin not specified.");
-		return 0;
-	}
+	if (!cow_name)
+		return SEG_LOG_ERROR("Snapshot cow storage not specified in");
 
-	log_suppress(old_suppress);
+	if (!dm_config_has_node(sn, "origin"))
+		return SEG_LOG_ERROR("Snapshot origin not specified in");
 
-	if (!(cow = find_lv(seg->lv->vg, cow_name))) {
-		log_error("Unknown logical volume specified for "
-			  "snapshot cow store.");
-		return 0;
-	}
+	if (!(org_name = dm_config_find_str(sn, "origin", NULL)))
+		return SEG_LOG_ERROR("Snapshot origin must be a string in");
 
-	if (!(org = find_lv(seg->lv->vg, org_name))) {
-		log_error("Unknown logical volume specified for "
-			  "snapshot origin.");
-		return 0;
-	}
+	if (!(cow = find_lv(seg->lv->vg, cow_name)))
+		return SEG_LOG_ERROR("Unknown logical volume %s specified for "
+				     "snapshot cow store in", cow_name);
+
+	if (!(org = find_lv(seg->lv->vg, org_name)))
+		return SEG_LOG_ERROR("Unknown logical volume %s specified for "
+			  "snapshot origin in", org_name);
 
 	init_snapshot_seg(seg, org, cow, chunk_size, merge);
 
@@ -103,80 +100,89 @@ static int _snap_text_export(const struct lv_segment *seg, struct formatter *f)
 	return 1;
 }
 
+#ifdef DEVMAPPER_SUPPORT
 static int _snap_target_status_compatible(const char *type)
 {
 	return (strcmp(type, "snapshot-merge") == 0);
 }
 
-#ifdef DEVMAPPER_SUPPORT
 static int _snap_target_percent(void **target_state __attribute__((unused)),
-				percent_t *percent,
+				dm_percent_t *percent,
 				struct dm_pool *mem __attribute__((unused)),
 				struct cmd_context *cmd __attribute__((unused)),
 				struct lv_segment *seg __attribute__((unused)),
 				char *params, uint64_t *total_numerator,
 				uint64_t *total_denominator)
 {
-	uint64_t total_sectors, sectors_allocated, metadata_sectors;
-	int r;
+	struct dm_status_snapshot *s;
 
-	/*
-	 * snapshot target's percent format:
-	 * <= 1.7.0: <sectors_allocated>/<total_sectors>
-	 * >= 1.8.0: <sectors_allocated>/<total_sectors> <metadata_sectors>
-	 */
-	r = sscanf(params, "%" PRIu64 "/%" PRIu64 " %" PRIu64,
-		   &sectors_allocated, &total_sectors, &metadata_sectors);
-	if (r == 2 || r == 3) {
-		*total_numerator += sectors_allocated;
-		*total_denominator += total_sectors;
-		if (r == 3 && sectors_allocated == metadata_sectors)
-			*percent = PERCENT_0;
-		else if (sectors_allocated == total_sectors)
-			*percent = PERCENT_100;
+	if (!dm_get_status_snapshot(mem, params, &s))
+		return_0;
+
+	if (s->invalid)
+		*percent = DM_PERCENT_INVALID;
+	else if (s->merge_failed)
+		*percent = LVM_PERCENT_MERGE_FAILED;
+	else {
+		*total_numerator += s->used_sectors;
+		*total_denominator += s->total_sectors;
+		if (s->has_metadata_sectors &&
+		    s->used_sectors == s->metadata_sectors)
+			*percent = DM_PERCENT_0;
+		else if (s->used_sectors == s->total_sectors)
+			*percent = DM_PERCENT_100;
 		else
-			*percent = make_percent(*total_numerator, *total_denominator);
+			*percent = dm_make_percent(*total_numerator, *total_denominator);
 	}
-	else if (!strcmp(params, "Invalid"))
-		*percent = PERCENT_INVALID;
-	else if (!strcmp(params, "Merge failed"))
-		*percent = PERCENT_MERGE_FAILED;
-	else
-		return 0;
 
 	return 1;
 }
 
 static int _snap_target_present(struct cmd_context *cmd,
 				const struct lv_segment *seg,
-				unsigned *attributes __attribute__((unused)))
+				unsigned *attributes)
 {
 	static int _snap_checked = 0;
 	static int _snap_merge_checked = 0;
 	static int _snap_present = 0;
 	static int _snap_merge_present = 0;
+	static unsigned _snap_attrs = 0;
+	uint32_t maj, min, patchlevel;
 
 	if (!_snap_checked) {
+		_snap_checked = 1;
 		_snap_present = target_present(cmd, "snapshot", 1) &&
 		    target_present(cmd, "snapshot-origin", 0);
-		_snap_checked = 1;
+
+		if (_snap_present &&
+		    target_version("snapshot", &maj, &min, &patchlevel) &&
+		    (maj > 1 ||
+		     (maj == 1 && (min >= 12 || (min == 10 && patchlevel >= 2)))))
+			_snap_attrs |= SNAPSHOT_FEATURE_FIXED_LEAK;
+		else
+			log_very_verbose("Target snapshot may leak metadata.");
 	}
 
-	if (!_snap_merge_checked && seg && (seg->status & MERGING)) {
-		_snap_merge_present = target_present(cmd, "snapshot-merge", 0);
-		_snap_merge_checked = 1;
+	if (attributes)
+		*attributes = _snap_attrs;
+
+	/* TODO: test everything at once */
+	if (seg && (seg->status & MERGING)) {
+		if (!_snap_merge_checked) {
+			_snap_merge_present = target_present(cmd, "snapshot-merge", 0);
+			_snap_merge_checked = 1;
+		}
 		return _snap_present && _snap_merge_present;
 	}
 
 	return _snap_present;
 }
 
-#ifdef DMEVENTD
+#  ifdef DMEVENTD
 
 static const char *_get_snapshot_dso_path(struct cmd_context *cmd)
 {
-	return get_monitor_dso_path(cmd, find_config_tree_str(cmd, "dmeventd/snapshot_library",
-							      DEFAULT_DMEVENTD_SNAPSHOT_LIB));
+	return get_monitor_dso_path(cmd, find_config_tree_str(cmd, dmeventd_snapshot_library_CFG, NULL));
 }
 
 /* FIXME Cache this */
@@ -206,8 +212,7 @@ static int _target_unregister_events(struct lv_segment *seg,
 	return _target_set_events(seg, events, 0);
 }
 
-#endif /* DMEVENTD */
-#endif
+#  endif /* DMEVENTD */
 
 static int _snap_modules_needed(struct dm_pool *mem,
 				const struct lv_segment *seg __attribute__((unused)),
@@ -220,6 +225,7 @@ static int _snap_modules_needed(struct dm_pool *mem,
 
 	return 1;
 }
+#endif /* DEVMAPPER_SUPPORT */
 
 static void _snap_destroy(struct segment_type *segtype)
 {
@@ -231,17 +237,17 @@ static struct segtype_handler _snapshot_ops = {
 	.target_name = _snap_target_name,
 	.text_import = _snap_text_import,
 	.text_export = _snap_text_export,
-	.target_status_compatible = _snap_target_status_compatible,
 #ifdef DEVMAPPER_SUPPORT
+	.target_status_compatible = _snap_target_status_compatible,
 	.target_percent = _snap_target_percent,
 	.target_present = _snap_target_present,
+	.modules_needed = _snap_modules_needed,
 #  ifdef DMEVENTD
 	.target_monitored = _target_registered,
 	.target_monitor_events = _target_register_events,
 	.target_unmonitor_events = _target_unregister_events,
 #  endif	/* DMEVENTD */
 #endif
-	.modules_needed = _snap_modules_needed,
 	.destroy = _snap_destroy,
 };
 

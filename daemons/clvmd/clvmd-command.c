@@ -51,9 +51,6 @@
 */
 
 #include "clvmd-common.h"
-
-#include <pthread.h>
-
 #include "clvmd-comms.h"
 #include "clvm.h"
 #include "clvmd.h"
@@ -80,9 +77,6 @@ int do_command(struct local_client *client, struct clvm_header *msg, int msglen,
 	struct utsname nodeinfo;
 	unsigned char lock_cmd;
 	unsigned char lock_flags;
-
-	/* Reset test mode before we start */
-	init_test(0);
 
 	/* Do the command */
 	switch (msg->cmd) {
@@ -115,8 +109,6 @@ int do_command(struct local_client *client, struct clvm_header *msg, int msglen,
 		lockname = &args[2];
 		/* Check to see if the VG is in use by LVM1 */
 		status = do_check_lvm1(lockname);
-		if (lock_flags & LCK_TEST_MODE)
-			init_test(1);
 		do_lock_vg(lock_cmd, lock_flags, lockname);
 		break;
 
@@ -125,8 +117,6 @@ int do_command(struct local_client *client, struct clvm_header *msg, int msglen,
 		lock_cmd = args[0];
 		lock_flags = args[1];
 		lockname = &args[2];
-		if (lock_flags & LCK_TEST_MODE)
-			init_test(1);
 		status = do_lock_lv(lock_cmd, lock_flags, lockname);
 		/* Replace EIO with something less scary */
 		if (status == EIO) {
@@ -186,64 +176,58 @@ int do_command(struct local_client *client, struct clvm_header *msg, int msglen,
 	}
 
 	return status;
-
 }
 
 static int lock_vg(struct local_client *client)
 {
-    struct dm_hash_table *lock_hash;
-    struct clvm_header *header =
-	(struct clvm_header *) client->bits.localsock.cmd;
-    unsigned char lock_cmd;
-    int lock_mode;
-    char *args = header->node + strlen(header->node) + 1;
-    int lkid;
-    int status = 0;
-    char *lockname;
+	struct dm_hash_table *lock_hash;
+	struct clvm_header *header =
+		(struct clvm_header *) client->bits.localsock.cmd;
+	unsigned char lock_cmd;
+	int lock_mode;
+	char *args = header->node + strlen(header->node) + 1;
+	int lkid;
+	int status;
+	char *lockname;
 
-    /* Keep a track of VG locks in our own hash table. In current
-       practice there should only ever be more than two VGs locked
-       if a user tries to merge lots of them at once */
-    if (client->bits.localsock.private) {
-	lock_hash = (struct dm_hash_table *)client->bits.localsock.private;
-    }
-    else {
-	lock_hash = dm_hash_create(3);
-	if (!lock_hash)
-	    return ENOMEM;
-	client->bits.localsock.private = (void *)lock_hash;
-    }
+	/*
+	 * Keep a track of VG locks in our own hash table. In current
+	 * practice there should only ever be more than two VGs locked
+	 * if a user tries to merge lots of them at once
+	 */
+	if (!client->bits.localsock.private) {
+		if (!(lock_hash = dm_hash_create(3)))
+			return ENOMEM;
+		client->bits.localsock.private = (void *) lock_hash;
+	} else
+		lock_hash = (struct dm_hash_table *) client->bits.localsock.private;
 
-    lock_cmd = args[0] & (LCK_NONBLOCK | LCK_HOLD | LCK_SCOPE_MASK | LCK_TYPE_MASK);
-    lock_mode = ((int)lock_cmd & LCK_TYPE_MASK);
-    /* lock_flags = args[1]; */
-    lockname = &args[2];
-    DEBUGLOG("doing PRE command LOCK_VG '%s' at %x (client=%p)\n", lockname, lock_cmd, client);
+	lock_cmd = args[0] & (LCK_NONBLOCK | LCK_HOLD | LCK_SCOPE_MASK | LCK_TYPE_MASK);
+	lock_mode = ((int) lock_cmd & LCK_TYPE_MASK);
+	/* lock_flags = args[1]; */
+	lockname = &args[2];
+	DEBUGLOG("doing PRE command LOCK_VG '%s' at %x (client=%p)\n", lockname, lock_cmd, client);
 
-    if (lock_mode == LCK_UNLOCK) {
+	if (lock_mode == LCK_UNLOCK) {
+		if (!(lkid = (int) (long) dm_hash_lookup(lock_hash, lockname)))
+			return EINVAL;
 
-	lkid = (int)(long)dm_hash_lookup(lock_hash, lockname);
-	if (lkid == 0)
-	    return EINVAL;
+		if ((status = sync_unlock(lockname, lkid)))
+			status = errno;
+		else
+			dm_hash_remove(lock_hash, lockname);
+	} else {
+		/* Read locks need to be PR; other modes get passed through */
+		if (lock_mode == LCK_READ)
+			lock_mode = LCK_PREAD;
 
-	status = sync_unlock(lockname, lkid);
-	if (status)
-	    status = errno;
-	else
-	    dm_hash_remove(lock_hash, lockname);
-    }
-    else {
-	/* Read locks need to be PR; other modes get passed through */
-	if (lock_mode == LCK_READ)
-	    lock_mode = LCK_PREAD;
-	status = sync_lock(lockname, lock_mode, (lock_cmd & LCK_NONBLOCK) ? LCKF_NOQUEUE : 0, &lkid);
-	if (status)
-	    status = errno;
-	else
-	    dm_hash_insert(lock_hash, lockname, (void *)(long)lkid);
-    }
+		if ((status = sync_lock(lockname, lock_mode, (lock_cmd & LCK_NONBLOCK) ? LCKF_NOQUEUE : 0, &lkid)))
+			status = errno;
+		else if (!dm_hash_insert(lock_hash, lockname, (void *) (long) lkid))
+			return ENOMEM;
+	}
 
-    return status;
+	return status;
 }
 
 
@@ -261,7 +245,6 @@ int do_pre_command(struct local_client *client)
 	int status = 0;
 	char *lockname;
 
-	init_test(0);
 	switch (header->cmd) {
 	case CLVMD_CMD_TEST:
 		status = sync_lock("CLVMD_TEST", LCK_EXCL, 0, &lockid);
@@ -280,8 +263,6 @@ int do_pre_command(struct local_client *client)
 		lock_cmd = args[0];
 		lock_flags = args[1];
 		lockname = &args[2];
-		if (lock_flags & LCK_TEST_MODE)
-			init_test(1);
 		status = pre_lock_lv(lock_cmd, lock_flags, lockname);
 		break;
 
@@ -313,20 +294,16 @@ int do_post_command(struct local_client *client)
 	char *args = header->node + strlen(header->node) + 1;
 	char *lockname;
 
-	init_test(0);
 	switch (header->cmd) {
 	case CLVMD_CMD_TEST:
-		status =
-		    sync_unlock("CLVMD_TEST", (int) (long) client->bits.localsock.private);
-		client->bits.localsock.private = 0;
+		status = sync_unlock("CLVMD_TEST", (int) (long) client->bits.localsock.private);
+		client->bits.localsock.private = NULL;
 		break;
 
 	case CLVMD_CMD_LOCK_LV:
 		lock_cmd = args[0];
 		lock_flags = args[1];
 		lockname = &args[2];
-		if (lock_flags & LCK_TEST_MODE)
-			init_test(1);
 		status = post_lock_lv(lock_cmd, lock_flags, lockname);
 		break;
 
@@ -359,7 +336,7 @@ void cmd_client_cleanup(struct local_client *client)
 	}
 
 	dm_hash_destroy(lock_hash);
-	client->bits.localsock.private = 0;
+	client->bits.localsock.private = NULL;
 }
 
 
@@ -385,7 +362,7 @@ static int restart_clvmd(void)
 	} while (hn);
 
 	/* clvmd + locks (-E uuid) + debug (-d X) + NULL */
-	if (!(argv = malloc((max_locks * 2 + 5) * sizeof(*argv))))
+	if (!(argv = malloc((max_locks * 2 + 6) * sizeof(*argv))))
 		goto_out;
 
 	/*
@@ -393,12 +370,16 @@ static int restart_clvmd(void)
 	 */
 	argv[argc++] = "clvmd";
 
-	/* Propogate debug options */
+	/* Propagate debug options */
 	if (clvmd_get_debug()) {
 		if (dm_snprintf(debug_arg, sizeof(debug_arg), "-d%u", clvmd_get_debug()) < 0)
 			goto_out;
 		argv[argc++] = debug_arg;
 	}
+
+	/* Propagate foreground options */
+	if (clvmd_get_foreground())
+		argv[argc++] = "-f";
 
 	argv[argc++] = "-I";
 	argv[argc++] = clops->name;

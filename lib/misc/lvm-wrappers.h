@@ -17,14 +17,13 @@
 #define _LVM_WRAPPERS_H
 
 #ifdef UDEV_SYNC_SUPPORT
-#include <libudev.h>
+struct udev;
 struct udev *udev_get_library_context(void);
 #endif
 
 int udev_init_library_context(void);
 void udev_fin_library_context(void);
 int udev_is_running(void);
-const char *udev_get_dev_dir(void);
 
 int lvm_getpagesize(void);
 
@@ -33,19 +32,13 @@ int lvm_getpagesize(void);
  */
 int read_urandom(void *buf, size_t len);
 
-#  ifndef HAVE_SIGINTERRUPT
-#    define siginterrupt(sig, flag) \
-	do { \
-		int ret; \
-		struct sigaction act; \
-		(void) sigaction(sig, NULL, &act); \
-		if (flag) \
-			act.sa_flags &= SA_RESTART; \
-		else \
-			act.sa_flags |= SA_RESTART; \
-		ret = sigaction(sig, &act, NULL); \
-		return ret; \
-	while (0)
-#  endif
+/*
+ * Return random integer in [0,max) interval
+ */
+unsigned lvm_even_rand(unsigned *seed, unsigned max);
+
+int clvmd_is_running(void);
+int cmirrord_is_running(void);
+
 
 #endif

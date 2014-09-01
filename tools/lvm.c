@@ -27,6 +27,7 @@ int main(int argc, char **argv)
 #  include <readline/history.h>
 #  ifndef HAVE_RL_COMPLETION_MATCHES
 #    define rl_completion_matches(a, b) completion_matches((char *)a, b)
+#    define rl_completion_func_t CPPFunction
 #  endif
 
 static struct cmdline_context *_cmdline;
@@ -165,8 +166,7 @@ static void _read_history(struct cmd_context *cmd)
 	if (read_history(hist_file))
 		log_very_verbose("Couldn't read history from %s.", hist_file);
 
-	stifle_history(find_config_tree_int(cmd, "shell/history_size",
-				       DEFAULT_MAX_HISTORY));
+	stifle_history(find_config_tree_int(cmd, shell_history_size_CFG, NULL));
 }
 
 static void _write_history(void)
@@ -186,7 +186,7 @@ int lvm_shell(struct cmd_context *cmd, struct cmdline_context *cmdline)
 	char *input = NULL, *args[MAX_ARGS], **argv;
 
 	rl_readline_name = "lvm";
-	rl_attempted_completion_function = (CPPFunction *) _completion;
+	rl_attempted_completion_function = (rl_completion_func_t *) _completion;
 
 	_read_history(cmd);
 
@@ -199,6 +199,7 @@ int lvm_shell(struct cmd_context *cmd, struct cmdline_context *cmdline)
 
 		/* EOF */
 		if (!input) {
+			/* readline sends prompt to stdout */
 			printf("\n");
 			break;
 		}

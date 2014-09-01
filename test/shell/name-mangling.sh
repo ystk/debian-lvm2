@@ -1,3 +1,4 @@
+#!/bin/sh
 # Copyright (C) 2012 Red Hat, Inc. All rights reserved.
 #
 # This copyrighted material is made available to anyone wishing to use,
@@ -8,15 +9,18 @@
 # along with this program; if not, write to the Free Software Foundation,
 # Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
-. lib/test
+. lib/inittest
 
-name_prefix=$RANDOM
+# This test is not using any lvm command
+# so skip duplicate CLMVD and lvmetad test
+test -e LOCAL_CLVMD && skip
+test -e LOCAL_LVMETAD && skip
 
 CHARACTER_WHITELIST="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789#+-.:=@_"
 FAIL_MIXED_STR="contains mixed mangled and unmangled characters"
 FAIL_MULTI_STR="seems to be mangled more than once"
 FAIL_BLACK_STR="should be mangled but it contains blacklisted characters"
-CORRECT_FORM_STR="name already in correct form"
+CORRECT_FORM_STR="already in correct form"
 RENAMING_STR="renaming to"
 
 function create_dm_dev()
@@ -33,7 +37,7 @@ function create_dm_dev()
 		verify_udev=""
 	fi
 
-	dmsetup create "${name_prefix}$name" $verify_udev --manglename $mode --table "0 1 zero"
+	aux dmsetup create "${PREFIX}$name" $verify_udev --manglename $mode --table "0 1 zero"
 }
 
 function remove_dm_dev()
@@ -47,7 +51,7 @@ function remove_dm_dev()
 		verify_udev=""
 	fi
 
-	dmsetup remove $verify_udev --manglename $mode "${name_prefix}$name"
+	aux dmsetup remove $verify_udev --manglename $mode "${PREFIX}$name"
 }
 
 function check_create_and_remove()
@@ -63,17 +67,17 @@ function check_create_and_remove()
 		verify_udev=""
 	fi
 
-	dmsetup create "${name_prefix}$input_name" $verify_udev --manglename $mode --table "0 1 zero" 2>err && \
-	test -b "$DM_DEV_DIR/mapper/${name_prefix}$dm_name" && \
-	dmsetup remove "${name_prefix}$input_name" $verify_udev --manglename $mode || r=1
+	aux dmsetup create "${PREFIX}$input_name" $verify_udev --manglename $mode --table "0 1 zero" 2>err && \
+	test -b "$DM_DEV_DIR/mapper/${PREFIX}$dm_name" && \
+	aux dmsetup remove "${PREFIX}$input_name" $verify_udev --manglename $mode || r=1
 
-	if [ $dm_name = "FAIL_MIXED" ]; then
+	if [ "$dm_name" = "FAIL_MIXED" ]; then
 		r=0
 		grep "$FAILED_MIXED_STR" err || r=1
-	elif [ $dm_name = "FAIL_MULTI" ]; then
+	elif [ "$dm_name" = "FAIL_MULTI" ]; then
 		r=0
 		grep "$FAILED_MULTI_STR" err || r=1
-	elif [ $dm_name = "FAIL_BLACK" ]; then
+	elif [ "$dm_name" = "FAIL_BLACK" ]; then
 		r=0
 		grep "$FAILED_BLACK_STR" err || r=1
 	fi
@@ -84,11 +88,11 @@ function check_create_and_remove()
 function check_dm_field()
 {
 	local mode=$1
-	local dm_name="$2"
+	local dm_name=$2
 	local field=$3
-	local expected="$4"
+	local expected=$4
 
-	value=$(dmsetup info --rows --noheadings --manglename $mode -c -o $field "${DM_DEV_DIR}/mapper/${name_prefix}$dm_name" 2> err || true)
+	value=$(dmsetup info --rows --noheadings --manglename $mode -c -o $field "${DM_DEV_DIR}/mapper/${PREFIX}$dm_name" 2> err || true)
 
 	if [ "$expected" = "FAIL_MIXED" ]; then
 		grep "$FAIL_MIXED_STR" err
@@ -97,19 +101,19 @@ function check_dm_field()
 	elif [ "$expected" = "FAIL_BLACK" ]; then
 		grep "$FAIL_BLACK_STR" err
 	else
-		test "$value" = "${name_prefix}$expected"
+		test "$value" = "${PREFIX}$expected"
 	fi
 }
 
 function check_expected_names()
 {
 	local mode=$1
-	local dm_name="$2"
+	local dm_name=$2
 	local r=0
 
 	create_dm_dev none "$dm_name"
 
-	test -b "$DM_DEV_DIR/mapper/${name_prefix}$dm_name" && \
+	test -b "$DM_DEV_DIR/mapper/${PREFIX}$dm_name" && \
 	check_dm_field none "$dm_name" name "$dm_name" && \
 	check_dm_field $mode "$dm_name" name "$3" && \
 	check_dm_field $mode "$dm_name" mangled_name "$4" && \
@@ -123,14 +127,14 @@ function check_expected_names()
 function check_mangle_cmd()
 {
 	local mode=$1
-	local dm_name="$2"
-	local expected="$3"
+	local dm_name=$2
+	local expected=$3
 	local rename_expected=0
 	local r=0
 
 	create_dm_dev none "$dm_name"
 
-	dmsetup mangle --manglename $mode "${name_prefix}$dm_name" 1>out 2>err || true;
+	dmsetup mangle --manglename $mode --verifyudev "${PREFIX}$dm_name" 1>out 2>err || true;
 
 	if [ "$expected" = "OK" ]; then
 		grep "$CORRECT_FORM_STR" out || r=1
@@ -140,7 +144,30 @@ function check_mangle_cmd()
 		grep "$FAIL_MULTI_STR" err || r=1
 	else
 		rename_expected=1
-		grep -F "$RENAMING_STR ${name_prefix}$expected" out || r=1
+		if grep -F "$RENAMING_STR ${PREFIX}$expected" out; then
+			# Check the old node is really renamed.
+			test -b "$DM_DEV_DIR/mapper/${PREFIX}$dm_name" && r=1
+			# FIXME: when renaming to mode=none with udev, udev will
+			#        remove the old_node, but fails to properly rename
+			#        to new_node. The libdevmapper code tries to call
+			#        rename(old_node,new_node), but that won't do anything
+			#        since the old node is already removed by udev.
+			#        For example renaming 'a\x20b' to 'a b':
+			#          - udev removes 'a\x20b'
+			#          - udev creates 'a' and 'b' (since it considers the ' ' as a delimiter)
+			#          - libdevmapper checks udev has done the rename properly
+			#          - libdevmapper calls stat(new_node) and it does not see it
+			#          - libdevmapper calls rename(old_node,new_node)
+			#          - the rename is a NOP since the old_node does not exist anymore
+			#
+			# Remove this condition once the problem is fixed in libdevmapper.
+			#
+			if [ "$mode" != "none" ]; then
+				test -b "$DM_DEV_DIR/mapper/${PREFIX}$expected" || r=1
+			fi
+		else
+			r=1
+		fi
 	fi
 
 	if [ $r = 0 -a $rename_expected = 1 ]; then
@@ -150,7 +177,7 @@ function check_mangle_cmd()
 		# failed to rename to expected or renamed when it should not - find the new name
 		new_name=$(sed -e "s/.*: $RENAMING_STR //g" out)
 		# try to remove any of the form - falling back to less probable error scenario
-		dmsetup remove --verifyudev --manglename none "$new_name" || \
+		remove_dm_dev none "$new_name" || \
 		remove_dm_dev none "$dm_name" || remove_dm_dev none "$expected"
 	else
 		# successfuly done nothing
@@ -163,8 +190,9 @@ function check_mangle_cmd()
 # check dmsetup can process path where the last component is not equal dm name (rhbz #797322)
 r=0
 create_dm_dev auto "abc"
-ln -s ${DM_DEV_DIR}/mapper/${name_prefix}abc ${DM_DEV_DIR}/${name_prefix}xyz
-dmsetup status ${DM_DEV_DIR}/${name_prefix}xyz || r=1
+ln -s "$DM_DEV_DIR/mapper/${PREFIX}abc" "$DM_DEV_DIR/${PREFIX}xyz"
+aux dmsetup status "$DM_DEV_DIR/${PREFIX}xyz" || r=1
+rm -f "$DM_DEV_DIR/${PREFIX}xyz"
 remove_dm_dev auto "abc"
 if [ r = 1 ]; then
 	exit 1

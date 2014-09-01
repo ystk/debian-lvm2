@@ -19,8 +19,6 @@
 #include "dev-cache.h"
 #include "locking.h"
 #include "metadata.h"
-#include "filter.h"
-#include "filter-persistent.h"
 #include "memlock.h"
 #include "str_list.h"
 #include "format-text.h"
@@ -38,6 +36,7 @@ struct lvmcache_info {
 	struct dm_list list;	/* Join VG members together */
 	struct dm_list mdas;	/* list head for metadata areas */
 	struct dm_list das;	/* list head for data areas */
+	struct dm_list bas;	/* list head for bootloader areas */
 	struct lvmcache_vginfo *vginfo;	/* NULL == unknown */
 	struct label *label;
 	const struct format_type *fmt;
@@ -65,6 +64,7 @@ struct lvmcache_vginfo {
 	unsigned holders;
 	unsigned vg_use_count;	/* Counter of vg reusage */
 	unsigned precommitted;	/* Is vgmetadata live or precommitted? */
+	unsigned cached_vg_invalidated;	/* Signal to regenerate cached_vg */
 };
 
 static struct dm_hash_table *_pvid_hash = NULL;
@@ -109,8 +109,6 @@ int lvmcache_init(void)
 		_vg_global_lock_held = 0;
 	}
 
-	lvmetad_init();
-
 	return 1;
 }
 
@@ -125,8 +123,7 @@ void lvmcache_seed_infos_from_lvmetad(struct cmd_context *cmd)
 	}
 
 	_has_scanned = 1;
-};
-
+}
 
 /* Volume Group metadata cache functions */
 static void _free_cached_vgmetadata(struct lvmcache_vginfo *vginfo)
@@ -144,7 +141,7 @@ static void _free_cached_vgmetadata(struct lvmcache_vginfo *vginfo)
 		vginfo->cft = NULL;
 	}
 
-	log_debug("Metadata cache: VG %s wiped.", vginfo->vgname);
+	log_debug_cache("Metadata cache: VG %s wiped.", vginfo->vgname);
 
 	release_vg(vginfo->cached_vg);
 }
@@ -187,9 +184,9 @@ static void _store_metadata(struct volume_group *vg, unsigned precommitted)
 		return;
 	}
 
-	log_debug("Metadata cache: VG %s (%s) stored (%" PRIsize_t " bytes%s).",
-		  vginfo->vgname, uuid, size,
-		  precommitted ? ", precommitted" : "");
+	log_debug_cache("Metadata cache: VG %s (%s) stored (%" PRIsize_t " bytes%s).",
+			vginfo->vgname, uuid, size,
+			precommitted ? ", precommitted" : "");
 }
 
 static void _update_cache_info_lock_state(struct lvmcache_info *info,
@@ -267,9 +264,9 @@ static void _drop_metadata(const char *vgname, int drop_precommitted)
 }
 
 /*
- * Remote node uses this to upgrade precommited metadata to commited state
+ * Remote node uses this to upgrade precommitted metadata to commited state
  * when receives vg_commit notification.
- * (Note that devices can be suspended here, if so, precommited metadata are already read.)
+ * (Note that devices can be suspended here, if so, precommitted metadata are already read.)
  */
 void lvmcache_commit_metadata(const char *vgname)
 {
@@ -279,8 +276,8 @@ void lvmcache_commit_metadata(const char *vgname)
 		return;
 
 	if (vginfo->precommitted) {
-		log_debug("Precommitted metadata cache: VG %s upgraded to committed.",
-			  vginfo->vgname);
+		log_debug_cache("Precommitted metadata cache: VG %s upgraded to committed.",
+				vginfo->vgname);
 		vginfo->precommitted = 0;
 	}
 }
@@ -432,17 +429,25 @@ struct lvmcache_vginfo *lvmcache_vginfo_from_vgname(const char *vgname, const ch
 	if (!vgname)
 		return lvmcache_vginfo_from_vgid(vgid);
 
-	if (!_vgname_hash)
+	if (!_vgname_hash) {
+		log_debug_cache(INTERNAL_ERROR "Internal cache is no yet initialized.");
 		return NULL;
+	}
 
-	if (!(vginfo = dm_hash_lookup(_vgname_hash, vgname)))
+	if (!(vginfo = dm_hash_lookup(_vgname_hash, vgname))) {
+		log_debug_cache("Metadata cache has no info for vgname: \"%s\"", vgname);
 		return NULL;
+	}
 
 	if (vgid)
 		do
 			if (!strncmp(vgid, vginfo->vgid, ID_LEN))
 				return vginfo;
 		while ((vginfo = vginfo->next));
+
+	if  (!vginfo)
+		log_debug_cache("Metadata cache has not found vgname \"%s\" with vgid \"%."
+				DM_TO_STRING(ID_LEN) "s\".", vgname, vgid ? : "");
 
 	return vginfo;
 }
@@ -517,15 +522,19 @@ struct lvmcache_vginfo *lvmcache_vginfo_from_vgid(const char *vgid)
 	struct lvmcache_vginfo *vginfo;
 	char id[ID_LEN + 1] __attribute__((aligned(8)));
 
-	if (!_vgid_hash || !vgid)
+	if (!_vgid_hash || !vgid) {
+		log_debug_cache(INTERNAL_ERROR "Internal cache cannot lookup vgid.");
 		return NULL;
+	}
 
 	/* vgid not necessarily NULL-terminated */
 	strncpy(&id[0], vgid, ID_LEN);
 	id[ID_LEN] = '\0';
 
-	if (!(vginfo = dm_hash_lookup(_vgid_hash, id)))
+	if (!(vginfo = dm_hash_lookup(_vgid_hash, id))) {
+		log_debug_cache("Metadata cache has no info for vgid \"%s\"", id);
 		return NULL;
+	}
 
 	return vginfo;
 }
@@ -709,8 +718,10 @@ int lvmcache_label_scan(struct cmd_context *cmd, int full_scan)
 	 * If we are a long-lived process, write out the updated persistent
 	 * device cache for the benefit of short-lived processes.
 	 */
-	if (full_scan == 2 && cmd->is_long_lived && cmd->dump_filter)
-		persistent_filter_dump(cmd->filter, 0);
+	if (full_scan == 2 && cmd->is_long_lived &&
+	    cmd->dump_filter && cmd->filter && cmd->filter->dump &&
+	    !cmd->filter->dump(cmd->filter, 0))
+		stack;
 
 	r = 1;
 
@@ -765,8 +776,10 @@ struct volume_group *lvmcache_get_vg(struct cmd_context *cmd, const char *vgname
 		return NULL;
 
 	/* Use already-cached VG struct when available */
-	if ((vg = vginfo->cached_vg))
+	if ((vg = vginfo->cached_vg) && !vginfo->cached_vg_invalidated)
 		goto out;
+
+	release_vg(vginfo->cached_vg);
 
 	fic.type = FMT_INSTANCE_MDAS | FMT_INSTANCE_AUX_MDAS;
 	fic.context.vg_ref.vg_name = vginfo->vgname;
@@ -787,6 +800,7 @@ struct volume_group *lvmcache_get_vg(struct cmd_context *cmd, const char *vgname
 	vginfo->cached_vg = vg;
 	vginfo->holders = 1;
 	vginfo->vg_use_count = 0;
+	vginfo->cached_vg_invalidated = 0;
 	vg->vginfo = vginfo;
 
 	if (!dm_pool_lock(vg->vgmem, detect_internal_vg_cache_corruption()))
@@ -795,9 +809,9 @@ struct volume_group *lvmcache_get_vg(struct cmd_context *cmd, const char *vgname
 out:
 	vginfo->holders++;
 	vginfo->vg_use_count++;
-	log_debug("Using cached %smetadata for VG %s with %u holder(s).",
-		  vginfo->precommitted ? "pre-committed " : "",
-		  vginfo->vgname, vginfo->holders);
+	log_debug_cache("Using cached %smetadata for VG %s with %u holder(s).",
+			vginfo->precommitted ? "pre-committed " : "",
+			vginfo->vgname, vginfo->holders);
 
 	return vg;
 
@@ -809,15 +823,15 @@ bad:
 // #if 0
 int lvmcache_vginfo_holders_dec_and_test_for_zero(struct lvmcache_vginfo *vginfo)
 {
-	log_debug("VG %s decrementing %d holder(s) at %p.",
-		  vginfo->cached_vg->name, vginfo->holders, vginfo->cached_vg);
+	log_debug_cache("VG %s decrementing %d holder(s) at %p.",
+			vginfo->cached_vg->name, vginfo->holders, vginfo->cached_vg);
 
 	if (--vginfo->holders)
 		return 0;
 
 	if (vginfo->vg_use_count > 1)
-		log_debug("VG %s reused %d times.",
-			  vginfo->cached_vg->name, vginfo->vg_use_count);
+		log_debug_cache("VG %s reused %d times.",
+				vginfo->cached_vg->name, vginfo->vg_use_count);
 
 	/* Debug perform crc check only when it's been used more then once */
 	if (!dm_pool_unlock(vginfo->cached_vg->vgmem,
@@ -1006,12 +1020,14 @@ static int _free_vginfo(struct lvmcache_vginfo *vginfo)
 				  vginfo->vgname);
 			r = 0;
 		}
-	} else do
-		if (vginfo2->next == vginfo) {
-			vginfo2->next = vginfo->next;
-			break;
+	} else
+		while (vginfo2) {
+			if (vginfo2->next == vginfo) {
+				vginfo2->next = vginfo->next;
+				break;
+			}
+			vginfo2 = vginfo2->next;
 		}
- 	while ((vginfo2 = vginfo2->next));
 
 	dm_free(vginfo->vgname);
 	dm_free(vginfo->creation_host);
@@ -1046,7 +1062,6 @@ static int _drop_vginfo(struct lvmcache_info *info, struct lvmcache_vginfo *vgin
 	return 1;
 }
 
-/* Unused
 void lvmcache_del(struct lvmcache_info *info)
 {
 	if (info->dev->pvid[0] && _pvid_hash)
@@ -1055,11 +1070,11 @@ void lvmcache_del(struct lvmcache_info *info)
 	_drop_vginfo(info, info->vginfo);
 
 	info->label->labeller->ops->destroy_label(info->label->labeller,
-						info->label);
+						  info->label);
 	dm_free(info);
 
 	return;
-} */
+}
 
 static int _lvmcache_update_pvid(struct lvmcache_info *info, const char *pvid)
 {
@@ -1096,7 +1111,7 @@ static int _lvmcache_update_vgid(struct lvmcache_info *info,
 		dm_hash_remove(_vgid_hash, vginfo->vgid);
 	if (!vgid) {
 		/* FIXME: unreachable code path */
-		log_debug("lvmcache: %s: clearing VGID", info ? dev_name(info->dev) : vginfo->vgname);
+		log_debug_cache("lvmcache: %s: clearing VGID", info ? dev_name(info->dev) : vginfo->vgname);
 		return 1;
 	}
 
@@ -1109,9 +1124,9 @@ static int _lvmcache_update_vgid(struct lvmcache_info *info,
 	}
 
 	if (!is_orphan_vg(vginfo->vgname))
-		log_debug("lvmcache: %s: setting %s VGID to %s",
-			  (info) ? dev_name(info->dev) : "",
-			  vginfo->vgname, vginfo->vgid);
+		log_debug_cache("lvmcache: %s: setting %s VGID to %s",
+				(info) ? dev_name(info->dev) : "",
+				vginfo->vgname, vginfo->vgid);
 
 	return 1;
 }
@@ -1288,11 +1303,11 @@ static int _lvmcache_update_vgname(struct lvmcache_info *info,
 						dm_list_size(&info2->mdas));
 				else
 					mdabuf[0] = '\0';
-				log_debug("lvmcache: %s: now in VG %s%s%s%s%s",
-					  dev_name(info2->dev),
-					  vgname, orphan_vginfo->vgid[0] ? " (" : "",
-					  orphan_vginfo->vgid[0] ? orphan_vginfo->vgid : "",
-					  orphan_vginfo->vgid[0] ? ")" : "", mdabuf);
+				log_debug_cache("lvmcache: %s: now in VG %s%s%s%s%s",
+						dev_name(info2->dev),
+						vgname, orphan_vginfo->vgid[0] ? " (" : "",
+						orphan_vginfo->vgid[0] ? orphan_vginfo->vgid : "",
+						orphan_vginfo->vgid[0] ? ")" : "", mdabuf);
 			}
 
 			if (!_drop_vginfo(NULL, primary_vginfo))
@@ -1330,13 +1345,13 @@ static int _lvmcache_update_vgname(struct lvmcache_info *info,
 			sprintf(mdabuf, " with %u mdas", dm_list_size(&info->mdas));
 		else
 			mdabuf[0] = '\0';
-		log_debug("lvmcache: %s: now in VG %s%s%s%s%s",
-			  dev_name(info->dev),
-			  vgname, vginfo->vgid[0] ? " (" : "",
-			  vginfo->vgid[0] ? vginfo->vgid : "",
-			  vginfo->vgid[0] ? ")" : "", mdabuf);
+		log_debug_cache("lvmcache: %s: now in VG %s%s%s%s%s",
+				dev_name(info->dev),
+				vgname, vginfo->vgid[0] ? " (" : "",
+				vginfo->vgid[0] ? vginfo->vgid : "",
+				vginfo->vgid[0] ? ")" : "", mdabuf);
 	} else
-		log_debug("lvmcache: initialised VG %s", vgname);
+		log_debug_cache("lvmcache: initialised VG %s", vgname);
 
 	return 1;
 }
@@ -1348,9 +1363,9 @@ static int _lvmcache_update_vgstatus(struct lvmcache_info *info, uint32_t vgstat
 		return 1;
 
 	if ((info->vginfo->status & EXPORTED_VG) != (vgstatus & EXPORTED_VG))
-		log_debug("lvmcache: %s: VG %s %s exported",
-			  dev_name(info->dev), info->vginfo->vgname,
-			  vgstatus & EXPORTED_VG ? "now" : "no longer");
+		log_debug_cache("lvmcache: %s: VG %s %s exported",
+				dev_name(info->dev), info->vginfo->vgname,
+				vgstatus & EXPORTED_VG ? "now" : "no longer");
 
 	info->vginfo->status = vgstatus;
 
@@ -1370,8 +1385,8 @@ static int _lvmcache_update_vgstatus(struct lvmcache_info *info, uint32_t vgstat
 		return 0;
 	}
 
-	log_debug("lvmcache: %s: VG %s: Set creation host to %s.",
-		  dev_name(info->dev), info->vginfo->vgname, creation_host);
+	log_debug_cache("lvmcache: %s: VG %s: Set creation host to %s.",
+			dev_name(info->dev), info->vginfo->vgname, creation_host);
 
 	return 1;
 }
@@ -1406,6 +1421,12 @@ int lvmcache_update_vgname_and_id(struct lvmcache_info *info,
 	    mdas_empty_or_ignored(&info->mdas) &&
 	    !is_orphan_vg(info->vginfo->vgname) && critical_section())
 		return 1;
+
+	/* If making a PV into an orphan, any cached VG metadata may become
+	 * invalid, incorrectly still referencing device structs.
+	 * (Example: pvcreate -ff) */
+	if (is_orphan_vg(vgname) && info->vginfo && !is_orphan_vg(info->vginfo->vgname))
+		info->vginfo->cached_vg_invalidated = 1;
 
 	/* If moving PV from orphan to real VG, always mark it valid */
 	if (!is_orphan_vg(vgname))
@@ -1450,6 +1471,8 @@ struct lvmcache_info *lvmcache_add(struct labeller *labeller, const char *pvid,
 				   const char *vgname, const char *vgid,
 				   uint32_t vgstatus)
 {
+	const struct format_type *fmt = labeller->fmt;
+	struct dev_types *dt = fmt->cmd->dev_types;
 	struct label *label;
 	struct lvmcache_info *existing, *info;
 	char pvid_s[ID_LEN + 1] __attribute__((aligned(8)));
@@ -1479,15 +1502,16 @@ struct lvmcache_info *lvmcache_add(struct labeller *labeller, const char *pvid,
 
 		lvmcache_del_mdas(info);
 		lvmcache_del_das(info);
+		lvmcache_del_bas(info);
 	} else {
 		if (existing->dev != dev) {
 			/* Is the existing entry a duplicate pvid e.g. md ? */
-			if (dev_subsystem_part_major(existing->dev) &&
-			    !dev_subsystem_part_major(dev)) {
+			if (dev_subsystem_part_major(dt, existing->dev) &&
+			    !dev_subsystem_part_major(dt, dev)) {
 				log_very_verbose("Ignoring duplicate PV %s on "
 						 "%s - using %s %s",
 						 pvid, dev_name(dev),
-						 dev_subsystem_name(existing->dev),
+						 dev_subsystem_name(dt, existing->dev),
 						 dev_name(existing->dev));
 				return NULL;
 			} else if (dm_is_dm_major(MAJOR(existing->dev->dev)) &&
@@ -1497,12 +1521,12 @@ struct lvmcache_info *lvmcache_add(struct labeller *labeller, const char *pvid,
 						 pvid, dev_name(dev),
 						 dev_name(existing->dev));
 				return NULL;
-			} else if (!dev_subsystem_part_major(existing->dev) &&
-				   dev_subsystem_part_major(dev))
+			} else if (!dev_subsystem_part_major(dt, existing->dev) &&
+				   dev_subsystem_part_major(dt, dev))
 				log_very_verbose("Duplicate PV %s on %s - "
 						 "using %s %s", pvid,
 						 dev_name(existing->dev),
-						 dev_subsystem_name(existing->dev),
+						 dev_subsystem_name(dt, existing->dev),
 						 dev_name(dev));
 			else if (!dm_is_dm_major(MAJOR(existing->dev->dev)) &&
 				 dm_is_dm_major(MAJOR(dev->dev)))
@@ -1520,9 +1544,9 @@ struct lvmcache_info *lvmcache_add(struct labeller *labeller, const char *pvid,
 					  dev_name(existing->dev));
 		}
 		if (strcmp(pvid_s, existing->dev->pvid)) 
-			log_debug("Updating pvid cache to %s (%s) from %s (%s)",
-				  pvid_s, dev_name(dev),
-				  existing->dev->pvid, dev_name(existing->dev));
+			log_debug_cache("Updating pvid cache to %s (%s) from %s (%s)",
+					pvid_s, dev_name(dev),
+					existing->dev->pvid, dev_name(existing->dev));
 		/* Switch over to new preferred device */
 		existing->dev = dev;
 		info = existing;
@@ -1537,7 +1561,7 @@ struct lvmcache_info *lvmcache_add(struct labeller *labeller, const char *pvid,
 		label = info->label;
 	}
 
-	info->fmt = (const struct format_type *) labeller->private;
+	info->fmt = labeller->fmt;
 	info->status |= CACHE_INVALID;
 
 	if (!_lvmcache_update_pvid(info, pvid_s)) {
@@ -1564,7 +1588,7 @@ struct lvmcache_info *lvmcache_add(struct labeller *labeller, const char *pvid,
 static void _lvmcache_destroy_entry(struct lvmcache_info *info)
 {
 	_vginfo_detach_info(info);
-	strcpy(info->dev->pvid, "");
+	info->dev->pvid[0] = 0;
 	label_destroy(info->label);
 	dm_free(info);
 }
@@ -1596,7 +1620,7 @@ static void _lvmcache_destroy_lockname(struct dm_hash_node *n)
 			  dm_hash_get_key(_lock_hash, n));
 }
 
-void lvmcache_destroy(struct cmd_context *cmd, int retain_orphans)
+void lvmcache_destroy(struct cmd_context *cmd, int retain_orphans, int reset)
 {
 	struct dm_hash_node *n;
 	log_verbose("Wiping internal VG cache");
@@ -1622,8 +1646,11 @@ void lvmcache_destroy(struct cmd_context *cmd, int retain_orphans)
 	}
 
 	if (_lock_hash) {
-		dm_hash_iterate(n, _lock_hash)
-			_lvmcache_destroy_lockname(n);
+		if (reset)
+			_vg_global_lock_held = 0;
+		else
+			dm_hash_iterate(n, _lock_hash)
+				_lvmcache_destroy_lockname(n);
 		dm_hash_destroy(_lock_hash);
 		_lock_hash = NULL;
 	}
@@ -1680,7 +1707,7 @@ static int _get_pv_if_in_vg(struct lvmcache_info *info,
 		 * lvmcache_label_scan() and drop cached
 		 * vginfo so make a local copy of string.
 		 */
-		strcpy(vgname, info->vginfo->vgname);
+		(void) dm_strncpy(vgname, info->vginfo->vgname, sizeof(vgname));
 		memcpy(vgid, info->vginfo->vgid, sizeof(vgid));
 
 		if (get_pv_from_vg_by_id(info->fmt, vgname, vgid,
@@ -1723,8 +1750,20 @@ int lvmcache_populate_pv_fields(struct lvmcache_info *info,
 		return 0;
 	}
 
+	/* Currently only support one bootloader area at most */
+	if (dm_list_size(&info->bas) > 1) {
+		log_error("Must be at most one bootloader area (found %d) on PV %s",
+			  dm_list_size(&info->bas), dev_name(info->dev));
+		return 0;
+	}
+
 	dm_list_iterate_items(da, &info->das)
 		pv->pe_start = da->disk_locn.offset >> SECTOR_SHIFT;
+
+	dm_list_iterate_items(da, &info->bas) {
+		pv->ba_start = da->disk_locn.offset >> SECTOR_SHIFT;
+		pv->ba_size = da->disk_locn.size >> SECTOR_SHIFT;
+	}
 
 	return 1;
 }
@@ -1753,6 +1792,13 @@ void lvmcache_del_das(struct lvmcache_info *info)
 	dm_list_init(&info->das);
 }
 
+void lvmcache_del_bas(struct lvmcache_info *info)
+{
+	if (info->bas.n)
+		del_bas(&info->bas);
+	dm_list_init(&info->bas);
+}
+
 int lvmcache_add_mda(struct lvmcache_info *info, struct device *dev,
 		     uint64_t start, uint64_t size, unsigned ignored)
 {
@@ -1764,6 +1810,10 @@ int lvmcache_add_da(struct lvmcache_info *info, uint64_t start, uint64_t size)
 	return add_da(NULL, &info->das, start, size);
 }
 
+int lvmcache_add_ba(struct lvmcache_info *info, uint64_t start, uint64_t size)
+{
+	return add_ba(NULL, &info->bas, start, size);
+}
 
 void lvmcache_update_pv(struct lvmcache_info *info, struct physical_volume *pv,
 			const struct format_type *fmt)
@@ -1784,6 +1834,25 @@ int lvmcache_update_das(struct lvmcache_info *info, struct physical_volume *pv)
 		dm_list_init(&info->das);
 
 	if (!add_da(NULL, &info->das, pv->pe_start << SECTOR_SHIFT, 0 /*pv->size << SECTOR_SHIFT*/))
+		return_0;
+
+	return 1;
+}
+
+int lvmcache_update_bas(struct lvmcache_info *info, struct physical_volume *pv)
+{
+	struct data_area_list *ba;
+	if (info->bas.n) {
+		if (!pv->ba_start && !pv->ba_size)
+			dm_list_iterate_items(ba, &info->bas) {
+				pv->ba_start = ba->disk_locn.offset >> SECTOR_SHIFT;
+				pv->ba_size = ba->disk_locn.size >> SECTOR_SHIFT;
+			}
+		del_das(&info->bas);
+	} else
+		dm_list_init(&info->bas);
+
+	if (!add_ba(NULL, &info->bas, pv->ba_start << SECTOR_SHIFT, pv->ba_size << SECTOR_SHIFT))
 		return_0;
 
 	return 1;
@@ -1815,7 +1884,7 @@ int lvmcache_foreach_mda(struct lvmcache_info *info,
 	return 1;
 }
 
-int lvmcache_mda_count(struct lvmcache_info *info)
+unsigned lvmcache_mda_count(struct lvmcache_info *info)
 {
 	return dm_list_size(&info->mdas);
 }
@@ -1827,6 +1896,19 @@ int lvmcache_foreach_da(struct lvmcache_info *info,
 	struct data_area_list *da;
 	dm_list_iterate_items(da, &info->das) {
 		if (!fun(&da->disk_locn, baton))
+			return_0;
+	}
+
+	return 1;
+}
+
+int lvmcache_foreach_ba(struct lvmcache_info *info,
+			 int (*fun)(struct disk_locn *, void *),
+			 void *baton)
+{
+	struct data_area_list *ba;
+	dm_list_iterate_items(ba, &info->bas) {
+		if (!fun(&ba->disk_locn, baton))
 			return_0;
 	}
 
@@ -1888,8 +1970,11 @@ int lvmcache_uncertain_ownership(struct lvmcache_info *info) {
 	return mdas_empty_or_ignored(&info->mdas);
 }
 
-int lvmcache_smallest_mda_size(struct lvmcache_info *info)
+uint64_t lvmcache_smallest_mda_size(struct lvmcache_info *info)
 {
+	if (!info)
+		return UINT64_C(0);
+
 	return find_min_mda_size(&info->mdas);
 }
 

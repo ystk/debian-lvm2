@@ -1,3 +1,4 @@
+#!/bin/sh
 # Copyright (C) 2010 Red Hat, Inc. All rights reserved.
 #
 # This copyrighted material is made available to anyone wishing to use,
@@ -8,22 +9,21 @@
 # along with this program; if not, write to the Free Software Foundation,
 # Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
-. lib/test
+. lib/inittest
 
-aux lvmconf 'devices/filter = [ "a/dev\/mirror/", "a/dev\/mapper\/.*$/", "a/dev\/LVMTEST/", "r/.*/" ]'
-cat $TESTDIR/etc/lvm.conf
-aux prepare_devs 3
+aux extend_filter_LVMTEST
+aux prepare_pvs 3
 
-pvcreate $(cat DEVICES)
-vgcreate $vg1 $dev1 $dev2
+vgcreate $vg1 "$dev1" "$dev2"
 lvcreate -n $lv1 -l 100%FREE $vg1
 
 #top VG
-pvcreate $DM_DEV_DIR/$vg1/$lv1
-vgcreate $vg $DM_DEV_DIR/$vg1/$lv1 $dev3
+pvcreate "$DM_DEV_DIR/$vg1/$lv1"
+vgcreate $vg "$DM_DEV_DIR/$vg1/$lv1" "$dev3"
 
-vgchange -a n $vg
-vgchange -a n $vg1
+vgchange -a n $vg $vg1
 
 # this should fail but not segfault, RHBZ 481793.
-not vgsplit $vg $vg1 $dev3
+not vgsplit $vg $vg1 "$dev3"
+
+vgremove -ff $vg $vg1

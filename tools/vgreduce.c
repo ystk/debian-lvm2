@@ -14,7 +14,6 @@
  */
 
 #include "tools.h"
-#include "lv_alloc.h"
 
 static int _remove_pv(struct volume_group *vg, struct pv_list *pvl, int silent)
 {
@@ -90,6 +89,12 @@ static int _make_vg_consistent(struct cmd_context *cmd, struct volume_group *vg)
 
 		/* Are any segments of this LV on missing PVs? */
 		if (lv->status & PARTIAL_LV) {
+			if (seg_is_raid(first_seg(lv))) {
+				if (!lv_raid_remove_missing(lv))
+					return_0;
+				goto restart;
+			}
+
 			if (lv->status & MIRRORED) {
 				if (!mirror_remove_missing(cmd, lv, 1))
 					return_0;
@@ -120,83 +125,15 @@ static int _vgreduce_single(struct cmd_context *cmd, struct volume_group *vg,
 			    struct physical_volume *pv,
 			    void *handle __attribute__((unused)))
 {
-	struct pv_list *pvl;
-	struct volume_group *orphan_vg = NULL;
-	int r = ECMD_FAILED;
-	const char *name = pv_dev_name(pv);
+	int r = vgreduce_single(cmd, vg, pv, 1);
 
-	if (pv_pe_alloc_count(pv)) {
-		log_error("Physical volume \"%s\" still in use", name);
+	if (!r)
 		return ECMD_FAILED;
-	}
 
-	if (vg->pv_count == 1) {
-		log_error("Can't remove final physical volume \"%s\" from "
-			  "volume group \"%s\"", name, vg->name);
-		return ECMD_FAILED;
-	}
-
-	if (!lock_vol(cmd, VG_ORPHANS, LCK_VG_WRITE)) {
-		log_error("Can't get lock for orphan PVs");
-		return ECMD_FAILED;
-	}
-
-	pvl = find_pv_in_vg(vg, name);
-
-	if (!archive(vg))
-		goto_bad;
-
-	log_verbose("Removing \"%s\" from volume group \"%s\"", name, vg->name);
-
-	if (pvl)
-		del_pvl_from_vgs(vg, pvl);
-
-	pv->vg_name = vg->fid->fmt->orphan_vg_name;
-	pv->status = ALLOCATABLE_PV;
-
-	if (!dev_get_size(pv_dev(pv), &pv->size)) {
-		log_error("%s: Couldn't get size.", pv_dev_name(pv));
-		goto bad;
-	}
-
-	vg->free_count -= pv_pe_count(pv) - pv_pe_alloc_count(pv);
-	vg->extent_count -= pv_pe_count(pv);
-
-	orphan_vg = vg_read_for_update(cmd, vg->fid->fmt->orphan_vg_name,
-				       NULL, 0);
-
-	if (vg_read_error(orphan_vg))
-		goto bad;
-
-	if (!vg_split_mdas(cmd, vg, orphan_vg) || !vg->pv_count) {
-		log_error("Cannot remove final metadata area on \"%s\" from \"%s\"",
-			  name, vg->name);
-		goto bad;
-	}
-
-	if (!vg_write(vg) || !vg_commit(vg)) {
-		log_error("Removal of physical volume \"%s\" from "
-			  "\"%s\" failed", name, vg->name);
-		goto bad;
-	}
-
-	if (!pv_write(cmd, pv, 0)) {
-		log_error("Failed to clear metadata from physical "
-			  "volume \"%s\" "
-			  "after removal from \"%s\"", name, vg->name);
-		goto bad;
-	}
-
-	backup(vg);
-
-	log_print("Removed \"%s\" from volume group \"%s\"", name, vg->name);
-	r = ECMD_PROCESSED;
-bad:
-	if (pvl)
-		free_pv_fid(pvl->pv);
-	unlock_and_release_vg(cmd, orphan_vg, VG_ORPHANS);
-	return r;
+	return ECMD_PROCESSED;
 }
+
+
 
 int vgreduce(struct cmd_context *cmd, int argc, char **argv)
 {
@@ -206,6 +143,7 @@ int vgreduce(struct cmd_context *cmd, int argc, char **argv)
 	int fixed = 1;
 	int repairing = arg_count(cmd, removemissing_ARG);
 	int saved_ignore_suspended_devices = ignore_suspended_devices();
+	int locked = 0;
 
 	if (!argc && !repairing) {
 		log_error("Please give volume group name and "
@@ -260,6 +198,8 @@ int vgreduce(struct cmd_context *cmd, int argc, char **argv)
 	    && !arg_count(cmd, removemissing_ARG))
 		goto_out;
 
+	locked = !vg_read_error(vg);
+
 	if (repairing) {
 		if (!vg_read_error(vg) && !vg_missing_pv_count(vg)) {
 			log_error("Volume group \"%s\" is already consistent",
@@ -275,6 +215,7 @@ int vgreduce(struct cmd_context *cmd, int argc, char **argv)
 					READ_ALLOW_INCONSISTENT
 					| READ_ALLOW_EXPORTED);
 
+		locked |= !vg_read_error(vg);
 		if (vg_read_error(vg) && vg_read_error(vg) != FAILED_READ_ONLY
 		    && vg_read_error(vg) != FAILED_INCONSISTENT)
 			goto_out;
@@ -296,8 +237,8 @@ int vgreduce(struct cmd_context *cmd, int argc, char **argv)
 		backup(vg);
 
 		if (fixed) {
-			log_print("Wrote out consistent volume group %s",
-				  vg_name);
+			log_print_unless_silent("Wrote out consistent volume group %s",
+						vg_name);
 			ret = ECMD_PROCESSED;
 		} else
 			ret = ECMD_FAILED;
@@ -314,7 +255,10 @@ int vgreduce(struct cmd_context *cmd, int argc, char **argv)
 	}
 out:
 	init_ignore_suspended_devices(saved_ignore_suspended_devices);
-	unlock_and_release_vg(cmd, vg, vg_name);
+	if (locked)
+		unlock_vg(cmd, vg_name);
+
+	release_vg(vg);
 
 	return ret;
 

@@ -17,13 +17,13 @@
 #include "device.h"
 #include "memlock.h"
 #include "lvm-string.h"
-#include "lvm-file.h"
 #include "defaults.h"
 #include "metadata-exported.h"
 
 #include <stdarg.h>
 
 static int _verbose_level = VERBOSE_BASE_LEVEL;
+static int _silent = 0;
 static int _test = 0;
 static int _md_filtering = 0;
 static int _pvmove = 0;
@@ -31,6 +31,7 @@ static int _full_scan_done = 0;	/* Restrict to one full scan during each cmd */
 static int _obtain_device_list_from_udev = DEFAULT_OBTAIN_DEVICE_LIST_FROM_UDEV;
 static int _trust_cache = 0; /* Don't scan when incomplete VGs encountered */
 static int _debug_level = 0;
+static int _debug_classes_logged = DEFAULT_LOGGED_DEBUG_CLASSES;
 static int _log_cmd_name = 0;
 static int _ignorelockingfailure = 0;
 static int _security_level = SECURITY_LEVEL;
@@ -39,6 +40,7 @@ static int _mirror_in_sync = 0;
 static int _dmeventd_monitor = DEFAULT_DMEVENTD_MONITOR;
 static int _background_polling = DEFAULT_BACKGROUND_POLLING;
 static int _ignore_suspended_devices = 0;
+static int _ignore_lvm_mirrors = DEFAULT_IGNORE_LVM_MIRRORS;
 static int _error_message_produced = 0;
 static unsigned _is_static = 0;
 static int _udev_checking = 1;
@@ -55,10 +57,15 @@ void init_verbose(int level)
 	_verbose_level = level;
 }
 
+void init_silent(int silent)
+{
+	_silent = silent;
+}
+
 void init_test(int level)
 {
 	if (!_test && level)
-		log_print("Test mode: Metadata will NOT be updated and volumes will not be (de)activated.");
+		log_warn("TEST MODE: Metadata will NOT be updated and volumes will not be (de)activated.");
 	_test = level;
 }
 
@@ -117,6 +124,11 @@ void init_ignore_suspended_devices(int ignore)
 	_ignore_suspended_devices = ignore;
 }
 
+void init_ignore_lvm_mirrors(int scan)
+{
+	_ignore_lvm_mirrors = scan;
+}
+
 void init_cmd_name(int status)
 {
 	_log_cmd_name = status;
@@ -130,9 +142,9 @@ void init_is_static(unsigned value)
 void init_udev_checking(int checking)
 {
 	if ((_udev_checking = checking))
-		log_debug("LVM udev checking enabled");
+		log_debug_activation("LVM udev checking enabled");
 	else
-		log_debug("LVM udev checking disabled");
+		log_debug_activation("LVM udev checking disabled");
 }
 
 void init_retry_deactivation(int retry)
@@ -143,9 +155,9 @@ void init_retry_deactivation(int retry)
 void init_activation_checks(int checks)
 {
 	if ((_activation_checks = checks))
-		log_debug("LVM activation checks enabled");
+		log_debug_activation("LVM activation checks enabled");
 	else
-		log_debug("LVM activation checks disabled");
+		log_debug_activation("LVM activation checks disabled");
 }
 
 void init_dev_disable_after_error_count(int value)
@@ -253,9 +265,28 @@ int ignore_suspended_devices(void)
 	return _ignore_suspended_devices;
 }
 
+int ignore_lvm_mirrors(void)
+{
+	return _ignore_lvm_mirrors;
+}
+
 void init_debug(int level)
 {
 	_debug_level = level;
+}
+
+void init_debug_classes_logged(int classes)
+{
+	_debug_classes_logged = classes;
+}
+
+int debug_class_is_logged(int class)
+{
+	/* If no class given, log it */
+	if (!class)
+		return 1;
+
+	return (_debug_classes_logged & class) ? 1 : 0;
 }
 
 int verbose_level(void)
@@ -266,6 +297,11 @@ int verbose_level(void)
 int debug_level(void)
 {
 	return _debug_level;
+}
+
+int silent_mode(void)
+{
+	return _silent;
 }
 
 unsigned is_static(void)

@@ -1,5 +1,23 @@
 /* lib/misc/configure.h.in.  Generated from configure.in by autoheader.  */
 
+/* Define to 1 to use libblkid detection of signatures when wiping. */
+#undef BLKID_WIPING_SUPPORT
+
+/* The path to 'cache_check', if available. */
+#undef CACHE_CHECK_CMD
+
+/* The path to 'cache_dump', if available. */
+#undef CACHE_DUMP_CMD
+
+/* Define to 1 to include built-in support for cache. */
+#undef CACHE_INTERNAL
+
+/* The path to 'cache_repair', if available. */
+#undef CACHE_REPAIR_CMD
+
+/* The path to 'cache_restore', if available. */
+#undef CACHE_RESTORE_CMD
+
 /* Define to 1 if the `closedir' function returns void instead of `int'. */
 #undef CLOSEDIR_VOID
 
@@ -44,10 +62,19 @@
 /* Define default name mangling behaviour */
 #undef DEFAULT_DM_NAME_MANGLING
 
+/* Default DM run directory. */
+#undef DEFAULT_DM_RUN_DIR
+
 /* Name of default locking directory. */
 #undef DEFAULT_LOCK_DIR
 
-/* Name of default run directory. */
+/* Default directory to keep PID files in. */
+#undef DEFAULT_PID_DIR
+
+/* Name of default configuration profile subdirectory. */
+#undef DEFAULT_PROFILE_SUBDIR
+
+/* Default LVM run directory. */
 #undef DEFAULT_RUN_DIR
 
 /* Define to 0 to reinstate the pre-2.02.54 handling of unit suffixes. */
@@ -273,9 +300,6 @@
 /* Define to 1 if you have the `setlocale' function. */
 #undef HAVE_SETLOCALE
 
-/* Define to 1 if you have the `siginterrupt' function. */
-#undef HAVE_SIGINTERRUPT
-
 /* Define to 1 if you have the <signal.h> header file. */
 #undef HAVE_SIGNAL_H
 
@@ -426,9 +450,6 @@
 /* Define to 1 if you have the <utmpx.h> header file. */
 #undef HAVE_UTMPX_H
 
-/* Define to 1 if you have the <valgrind/memcheck.h> header file. */
-#undef HAVE_VALGRIND_MEMCHECK_H
-
 /* Define to 1 if you have the `vfork' function. */
 #undef HAVE_VFORK
 
@@ -454,6 +475,9 @@
 
 /* Define to 1 to include built-in support for LVM1 metadata. */
 #undef LVM1_INTERNAL
+
+/* Path to lvmetad pidfile. */
+#undef LVMETAD_PIDFILE
 
 /* Define to 1 to include code that uses lvmetad. */
 #undef LVMETAD_SUPPORT
@@ -534,8 +558,24 @@
 /* Define to 1 if you have the ANSI C header files. */
 #undef STDC_HEADERS
 
+/* The path to 'thin_check', if available. */
+#undef THIN_CHECK_CMD
+
+/* Define to 1 if the external 'thin_check' tool requires the
+   --clear-needs-check-flag option */
+#undef THIN_CHECK_NEEDS_CHECK
+
+/* The path to 'thin_dump', if available. */
+#undef THIN_DUMP_CMD
+
 /* Define to 1 to include built-in support for thin provisioning. */
 #undef THIN_INTERNAL
+
+/* The path to 'thin_repair', if available. */
+#undef THIN_REPAIR_CMD
+
+/* The path to 'thin_restore', if available. */
+#undef THIN_RESTORE_CMD
 
 /* Define to 1 if you can safely include both <sys/time.h> and <time.h>. */
 #undef TIME_WITH_SYS_TIME

@@ -1,3 +1,4 @@
+#!/bin/sh
 # Copyright (C) 2010 Red Hat, Inc. All rights reserved.
 #
 # This copyrighted material is made available to anyone wishing to use,
@@ -9,4 +10,7 @@
 # Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 . ./shell/lvconvert-mirror-basic.sh
+
 test_many 1
+
+vgremove -ff $vg

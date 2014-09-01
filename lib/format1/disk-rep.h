@@ -16,7 +16,6 @@
 #ifndef DISK_REP_FORMAT1_H
 #define DISK_REP_FORMAT1_H
 
-#include "lvm-types.h"
 #include "metadata.h"
 #include "toolcontext.h"
 
@@ -197,7 +196,8 @@ int read_pvs_in_vg(const struct format_type *fmt, const char *vg_name,
 		   struct dev_filter *filter,
 		   struct dm_pool *mem, struct dm_list *results);
 
-int write_disks(const struct format_type *fmt, struct dm_list *pvds);
+int write_disks(const struct format_type *fmt, struct dm_list *pvds,
+		int write_vg_metadata);
 
 /*
  * Functions to translate to between disk and in

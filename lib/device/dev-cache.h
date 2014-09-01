@@ -25,8 +25,10 @@
 struct dev_filter {
 	int (*passes_filter) (struct dev_filter * f, struct device * dev);
 	void (*destroy) (struct dev_filter * f);
-	unsigned use_count;
+	void (*wipe) (struct dev_filter * f);
+	int (*dump) (struct dev_filter * f, int merge_existing);
 	void *private;
+	unsigned use_count;
 };
 
 /*
@@ -34,7 +36,11 @@ struct dev_filter {
  */
 struct cmd_context;
 int dev_cache_init(struct cmd_context *cmd);
-void dev_cache_exit(void);
+int dev_cache_exit(void);
+/*
+ * Returns number of open devices.
+ */
+int dev_cache_check_for_open_devices(void);
 
 /* Trigger(1) or avoid(0) a scan */
 void dev_cache_scan(int do_scan);
@@ -42,12 +48,13 @@ int dev_cache_has_scanned(void);
 
 int dev_cache_add_dir(const char *path);
 int dev_cache_add_loopfile(const char *path);
+__attribute__((nonnull(1)))
 struct device *dev_cache_get(const char *name, struct dev_filter *f);
 
 // TODO
 struct device *dev_cache_get_by_devt(dev_t device, struct dev_filter *f);
 
-void dev_set_preferred_name(struct str_list *sl, struct device *dev);
+void dev_set_preferred_name(struct dm_str_list *sl, struct device *dev);
 
 /*
  * Object for iterating through the cache.

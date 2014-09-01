@@ -15,7 +15,6 @@
 
 #include "lib.h"
 #include "metadata.h"
-#include "toolcontext.h"
 #include "lv_alloc.h"
 #include "pv_alloc.h"
 #include "str_list.h"
@@ -39,9 +38,19 @@ static int _merge(struct lv_segment *first, struct lv_segment *second)
 int lv_merge_segments(struct logical_volume *lv)
 {
 	struct dm_list *segh, *t;
-	struct lv_segment *current, *prev = NULL;
+	struct lv_segment *seg, *current, *prev = NULL;
+
+	/*
+	 * Don't interfere with pvmoves as they rely upon two LVs
+	 * having a matching segment structure.
+	 */
 
 	if (lv->status & LOCKED || lv->status & PVMOVE)
+		return 1;
+
+	if ((lv->status & MIRROR_IMAGE) &&
+	    (seg = get_only_segment_using_this_lv(lv)) &&
+	    (seg->lv->status & LOCKED || seg->lv->status & PVMOVE))
 		return 1;
 
 	dm_list_iterate_safe(segh, t, &lv->segments) {
@@ -77,18 +86,28 @@ int check_lv_segments(struct logical_volume *lv, int complete_vg)
 
 	/* Check LV flags match first segment type */
 	if (complete_vg) {
-		if (lv_is_thin_volume(lv) &&
-		    (!(seg2 = first_seg(lv)) || !seg_is_thin_volume(seg2))) {
-			log_error("LV %s is thin volume without first thin volume segment",
-				  lv->name);
-			inc_error_count;
+		if (lv_is_thin_volume(lv)) {
+			if (dm_list_size(&lv->segments) != 1) {
+				log_error("LV %s is thin volume without exactly one segment.",
+					  lv->name);
+				inc_error_count;
+			} else if (!seg_is_thin_volume(first_seg(lv))) {
+				log_error("LV %s is thin volume without first thin volume segment.",
+					  lv->name);
+				inc_error_count;
+			}
 		}
 
-		if (lv_is_thin_pool(lv) &&
-		    (!(seg2 = first_seg(lv)) || !seg_is_thin_pool(seg2))) {
-			log_error("LV %s is thin pool without first thin pool segment",
-				  lv->name);
-			inc_error_count;
+		if (lv_is_thin_pool(lv)) {
+			if (dm_list_size(&lv->segments) != 1) {
+				log_error("LV %s is thin pool volume without exactly one segment.",
+					  lv->name);
+				inc_error_count;
+			} else if (!seg_is_thin_pool(first_seg(lv))) {
+				log_error("LV %s is thin pool without first thin pool segment.",
+					  lv->name);
+				inc_error_count;
+			}
 		}
 
 		if (lv_is_thin_pool_data(lv) &&
@@ -181,31 +200,38 @@ int check_lv_segments(struct logical_volume *lv, int complete_vg)
 					inc_error_count;
 				}
 
-				if (seg->area_count != 1 || seg_type(seg, 0) != AREA_LV) {
-					log_error("LV %s: thin pool segment %u is missing a pool data LV",
-						  lv->name, seg_count);
+			}
+			if (seg_is_pool(seg)) {
+				if (seg->area_count != 1 ||
+				    seg_type(seg, 0) != AREA_LV) {
+					log_error("LV %s: %s segment %u is missing a pool data LV",
+						  lv->name, seg->segtype->name, seg_count);
 					inc_error_count;
 				} else if (!(seg2 = first_seg(seg_lv(seg, 0))) || find_pool_seg(seg2) != seg) {
-					log_error("LV %s: thin pool segment %u data LV does not refer back to pool LV",
-						  lv->name, seg_count);
+					log_error("LV %s: %s segment %u data LV does not refer back to pool LV",
+						  lv->name, seg->segtype->name, seg_count);
 					inc_error_count;
 				}
 
 				if (!seg->metadata_lv) {
-					log_error("LV %s: thin pool segment %u is missing a pool metadata LV",
-						  lv->name, seg_count);
+					log_error("LV %s: %s segment %u is missing a pool metadata LV",
+						  lv->name, seg->segtype->name, seg_count);
 					inc_error_count;
 				} else if (!(seg2 = first_seg(seg->metadata_lv)) ||
 					   find_pool_seg(seg2) != seg) {
-					log_error("LV %s: thin pool segment %u metadata LV does not refer back to pool LV",
-						  lv->name, seg_count);
+					log_error("LV %s: %s segment %u metadata LV does not refer back to pool LV",
+						  lv->name, seg->segtype->name, seg_count);
 					inc_error_count;
 				}
 
-				if (seg->chunk_size < DM_THIN_MIN_DATA_BLOCK_SIZE ||
-				    seg->chunk_size > DM_THIN_MAX_DATA_BLOCK_SIZE) {
-					log_error("LV %s: thin pool segment %u  chunk size %d is out of range",
-						  lv->name, seg_count, seg->chunk_size);
+				if ((seg_is_thin_pool(seg) &&
+				     ((seg->chunk_size < DM_THIN_MIN_DATA_BLOCK_SIZE) ||
+				     (seg->chunk_size > DM_THIN_MAX_DATA_BLOCK_SIZE))) ||
+				    (seg_is_cache_pool(seg) &&
+				     ((seg->chunk_size < DM_CACHE_MIN_DATA_BLOCK_SIZE) ||
+				     (seg->chunk_size > DM_CACHE_MAX_DATA_BLOCK_SIZE)))) {
+					log_error("LV %s: %s segment %u has chunk size %u out of range.",
+						  lv->name, seg->segtype->name, seg_count, seg->chunk_size);
 					inc_error_count;
 				}
 			} else {
@@ -240,8 +266,37 @@ int check_lv_segments(struct logical_volume *lv, int complete_vg)
 				}
 
 				if (seg->device_id > DM_THIN_MAX_DEVICE_ID) {
-					log_error("LV %s: thin volume segment %u has too large device id %d",
+					log_error("LV %s: thin volume segment %u has too large device id %u",
 						  lv->name, seg_count, seg->device_id);
+					inc_error_count;
+				}
+				if (seg->external_lv && (seg->external_lv->status & LVM_WRITE)) {
+					log_error("LV %s: external origin %s is writable.",
+						  lv->name, seg->external_lv->name);
+					inc_error_count;
+				}
+
+				if (seg->merge_lv) {
+					if (!lv_is_thin_volume(seg->merge_lv)) {
+						log_error("LV %s: thin volume segment %u merging LV %s is not flagged as a thin LV",
+							  lv->name, seg_count, seg->merge_lv->name);
+						inc_error_count;
+					}
+					if (!lv_is_merging_origin(seg->merge_lv)) {
+						log_error("LV %s: merging LV %s is not flagged as merging.",
+							  lv->name, seg->merge_lv->name);
+						inc_error_count;
+					}
+				}
+			} else if (seg_is_cache(seg)) {
+				if (!lv_is_cache(lv)) {
+					log_error("LV %s is missing cache flag for segment %u",
+						  lv->name, seg_count);
+					inc_error_count;
+				}
+				if (!seg->pool_lv) {
+					log_error("LV %s: segment %u is missing cache_pool LV",
+						  lv->name, seg_count);
 					inc_error_count;
 				}
 			} else {
@@ -316,7 +371,7 @@ int check_lv_segments(struct logical_volume *lv, int complete_vg)
 						seg_found++;
 
 				if (!seg_found) {
-					log_error("LV %s segment %d uses LV %s,"
+					log_error("LV %s segment %u uses LV %s,"
 						  " but missing ptr from %s to %s",
 						  lv->name, seg_count,
 						  seg_lv(seg, s)->name,
@@ -324,7 +379,7 @@ int check_lv_segments(struct logical_volume *lv, int complete_vg)
 					inc_error_count;
 				} else if (seg_found > 1) {
 					log_error("LV %s has duplicated links "
-						  "to LV %s segment %d",
+						  "to LV %s segment %u",
 						  seg_lv(seg, s)->name,
 						  lv->name, seg_count);
 					inc_error_count;
@@ -373,7 +428,7 @@ int check_lv_segments(struct logical_volume *lv, int complete_vg)
 			seg_found++;
 		if (seg->metadata_lv == lv || seg->pool_lv == lv)
 			seg_found++;
-		if (seg_is_thin_volume(seg) && seg->origin == lv)
+		if (seg_is_thin_volume(seg) && (seg->origin == lv || seg->external_lv == lv))
 			seg_found++;
 		if (!seg_found) {
 			log_error("LV %s is used by LV %s:%" PRIu32 "-%" PRIu32
@@ -383,9 +438,9 @@ int check_lv_segments(struct logical_volume *lv, int complete_vg)
 				  seg->lv->name, lv->name);
 			inc_error_count;
 		} else if (seg_found != sl->count) {
-			log_error("Reference count mismatch: LV %s has %d "
+			log_error("Reference count mismatch: LV %s has %u "
 				  "links to LV %s:%" PRIu32 "-%" PRIu32
-				  ", which has %d links",
+				  ", which has %u links",
 				  lv->name, sl->count, seg->lv->name, seg->le,
 				  seg->le + seg->len - 1, seg_found);
 			inc_error_count;
@@ -430,7 +485,8 @@ static int _lv_split_segment(struct logical_volume *lv, struct lv_segment *seg,
 
 	if (!seg_can_split(seg)) {
 		log_error("Unable to split the %s segment at LE %" PRIu32
-			  " in LV %s", seg->segtype->name, le, lv->name);
+			  " in LV %s", seg->segtype->ops->name(seg),
+			  le, lv->name);
 		return 0;
 	}
 
@@ -474,9 +530,9 @@ static int _lv_split_segment(struct logical_volume *lv, struct lv_segment *seg,
 			if (!set_lv_segment_area_lv(split_seg, s, seg_lv(seg, s),
 						    seg_le(seg, s) + seg->area_len, 0))
 				return_0;
-			log_debug("Split %s:%u[%u] at %u: %s LE %u", lv->name,
-				  seg->le, s, le, seg_lv(seg, s)->name,
-				  seg_le(split_seg, s));
+			log_debug_alloc("Split %s:%u[%u] at %u: %s LE %u", lv->name,
+					seg->le, s, le, seg_lv(seg, s)->name,
+					seg_le(split_seg, s));
 			break;
 
 		case AREA_PV:
@@ -488,10 +544,10 @@ static int _lv_split_segment(struct logical_volume *lv, struct lv_segment *seg,
 						     seg->area_len,
 						 split_seg, s)))
 				return_0;
-			log_debug("Split %s:%u[%u] at %u: %s PE %u", lv->name,
-				  seg->le, s, le,
-				  dev_name(seg_dev(seg, s)),
-				  seg_pe(split_seg, s));
+			log_debug_alloc("Split %s:%u[%u] at %u: %s PE %u", lv->name,
+					seg->le, s, le,
+					dev_name(seg_dev(seg, s)),
+					seg_pe(split_seg, s));
 			break;
 
 		case AREA_UNASSIGNED:

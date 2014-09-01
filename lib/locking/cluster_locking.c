@@ -33,7 +33,7 @@
 #include <unistd.h>
 
 #ifndef CLUSTER_LOCKING_INTERNAL
-int lock_resource(struct cmd_context *cmd, const char *resource, uint32_t flags);
+int lock_resource(struct cmd_context *cmd, const char *resource, uint32_t flags, struct logical_volume *lv __attribute__((unused)));
 int query_resource(const char *resource, int *mode);
 void locking_end(void);
 int locking_init(int type, struct dm_config_tree *cf, uint32_t *flags);
@@ -65,7 +65,12 @@ static int _clvmd_sock = -1;
 static int _open_local_sock(int suppress_messages)
 {
 	int local_socket;
-	struct sockaddr_un sockaddr;
+	struct sockaddr_un sockaddr = { .sun_family = AF_UNIX };
+
+	if (!dm_strncpy(sockaddr.sun_path, CLVMD_SOCKNAME, sizeof(sockaddr.sun_path))) {
+		log_error("%s: clvmd socket name too long.", CLVMD_SOCKNAME);
+		return -1;
+	}
 
 	/* Open local socket */
 	if ((local_socket = socket(PF_UNIX, SOCK_STREAM, 0)) < 0) {
@@ -74,10 +79,6 @@ static int _open_local_sock(int suppress_messages)
 		return -1;
 	}
 
-	memset(&sockaddr, 0, sizeof(sockaddr));
-	memcpy(sockaddr.sun_path, CLVMD_SOCKNAME, sizeof(CLVMD_SOCKNAME));
-
-	sockaddr.sun_family = AF_UNIX;
 
 	if (connect(local_socket,(struct sockaddr *) &sockaddr,
 		    sizeof(sockaddr))) {
@@ -240,14 +241,12 @@ static int _cluster_request(char clvmd_cmd, const char *node, void *data, int le
 	 * With an extra pair of INTs on the front to sanity
 	 * check the pointer when we are given it back to free
 	 */
-	*response = dm_malloc(sizeof(lvm_response_t) * num_responses);
-	if (!*response) {
+	*response = NULL;
+	if (!(rarray = dm_malloc(sizeof(lvm_response_t) * num_responses))) {
 		errno = ENOMEM;
 		status = 0;
 		goto out;
 	}
-
-	rarray = *response;
 
 	/* Unpack the response into an lvm_response_t array */
 	inptr = head->args;
@@ -265,9 +264,9 @@ static int _cluster_request(char clvmd_cmd, const char *node, void *data, int le
 			int j;
 			for (j = 0; j < i; j++)
 				dm_free(rarray[i].response);
-			free(*response);
+			dm_free(rarray);
 			errno = ENOMEM;
-			status = -1;
+			status = 0;
 			goto out;
 		}
 
@@ -302,6 +301,8 @@ static int _cluster_free_request(lvm_response_t * response, int num)
 static int _lock_for_cluster(struct cmd_context *cmd, unsigned char clvmd_cmd,
 			     uint32_t flags, const char *name)
 {
+	/* TODO: convert to global usable solution and move static into cmd */
+	static unsigned char last_clvmd_cmd = 0;
 	int status;
 	int i;
 	char *args;
@@ -361,8 +362,13 @@ static int _lock_for_cluster(struct cmd_context *cmd, unsigned char clvmd_cmd,
 	 * SYNC_NAMES and VG_BACKUP use the VG name directly without prefix.
 	 */
 	if (clvmd_cmd == CLVMD_CMD_SYNC_NAMES) {
-		if (flags & LCK_LOCAL)
+		if (flags & LCK_LOCAL) {
 			node = NODE_LOCAL;
+			if (clvmd_cmd == last_clvmd_cmd) {
+				log_debug("Skipping redundant local sync command.");
+				return 1;
+			}
+		}
 	} else if (clvmd_cmd != CLVMD_CMD_VG_BACKUP) {
 		if (strncmp(name, "P_", 2) &&
 		    (clvmd_cmd == CLVMD_CMD_LOCK_VG ||
@@ -373,6 +379,7 @@ static int _lock_for_cluster(struct cmd_context *cmd, unsigned char clvmd_cmd,
 			node = NODE_REMOTE;
 	}
 
+	last_clvmd_cmd = clvmd_cmd;
 	status = _cluster_request(clvmd_cmd, node, args, len,
 				  &response, &num_responses);
 
@@ -404,9 +411,9 @@ static int _lock_for_cluster(struct cmd_context *cmd, unsigned char clvmd_cmd,
 /* API entry point for LVM */
 #ifdef CLUSTER_LOCKING_INTERNAL
 static int _lock_resource(struct cmd_context *cmd, const char *resource,
-			  uint32_t flags)
+			  uint32_t flags, struct logical_volume *lv __attribute__((unused)))
 #else
-int lock_resource(struct cmd_context *cmd, const char *resource, uint32_t flags)
+	int lock_resource(struct cmd_context *cmd, const char *resource, uint32_t flags, struct logical_volume *lv __attribute__((unused)))
 #endif
 {
 	char lockname[PATH_MAX];
@@ -418,6 +425,8 @@ int lock_resource(struct cmd_context *cmd, const char *resource, uint32_t flags)
 	assert(resource);
 
 	switch (flags & LCK_SCOPE_MASK) {
+	case LCK_ACTIVATION:
+		return 1;
 	case LCK_VG:
 		if (!strcmp(resource, VG_SYNC_NAMES)) {
 			log_very_verbose("Requesting sync names.");
@@ -517,8 +526,7 @@ static int decode_lock_type(const char *response)
 	else if (!strcmp(response, "PR"))
 		return LCK_PREAD;
 
-	stack;
-	return 0;
+	return_0;
 }
 
 #ifdef CLUSTER_LOCKING_INTERNAL
@@ -538,7 +546,7 @@ int query_resource(const char *resource, int *mode)
 	strcpy(args + 2, resource);
 
 	args[0] = 0;
-	args[1] = LCK_CLUSTER_VG;
+	args[1] = 0;
 
 	status = _cluster_request(CLVMD_CMD_LOCK_QUERY, node, args, len,
 				  &response, &num_responses);
@@ -559,8 +567,8 @@ int query_resource(const char *resource, int *mode)
 		if (decode_lock_type(response[i].response) > *mode)
 			*mode = decode_lock_type(response[i].response);
 
-		log_debug("Lock held for %s, node %s : %s", resource,
-			  response[i].node, response[i].response);
+		log_debug_locking("Lock held for %s, node %s : %s", resource,
+				  response[i].node, response[i].response);
 	}
 
 	_cluster_free_request(response, num_responses);

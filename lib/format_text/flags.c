@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2001-2004 Sistina Software, Inc. All rights reserved.
- * Copyright (C) 2004-2006 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2004-2013 Red Hat, Inc. All rights reserved.
  *
  * This file is part of LVM2.
  *
@@ -38,6 +38,7 @@ static const struct flag _vg_flags[] = {
 	{SHARED, "SHARED", STATUS_FLAG},
 	{PARTIAL_VG, NULL, 0},
 	{PRECOMMITTED, NULL, 0},
+	{ARCHIVED_VG, NULL, 0},
 	{0, NULL, 0}
 };
 
@@ -58,6 +59,11 @@ static const struct flag _lv_flags[] = {
 	{LOCKED, "LOCKED", STATUS_FLAG},
 	{LV_NOTSYNCED, "NOTSYNCED", STATUS_FLAG},
 	{LV_REBUILD, "REBUILD", STATUS_FLAG},
+	{LV_WRITEMOSTLY, "WRITEMOSTLY", STATUS_FLAG},
+	{LV_ACTIVATION_SKIP, "ACTIVATION_SKIP", COMPATIBLE_FLAG},
+	{LV_NOSCAN, NULL, 0},
+	{LV_TEMPORARY, NULL, 0},
+	{POOL_METADATA_SPARE, NULL, 0},
 	{RAID, NULL, 0},
 	{RAID_META, NULL, 0},
 	{RAID_IMAGE, NULL, 0},
@@ -77,6 +83,10 @@ static const struct flag _lv_flags[] = {
 	{THIN_POOL, NULL, 0},
 	{THIN_POOL_DATA, NULL, 0},
 	{THIN_POOL_METADATA, NULL, 0},
+	{CACHE, NULL, 0},
+	{CACHE_POOL, NULL, 0},
+	{CACHE_POOL_DATA, NULL, 0},
+	{CACHE_POOL_METADATA, NULL, 0},
 	{0, NULL, 0}
 };
 
@@ -140,8 +150,8 @@ int print_flags(uint64_t status, int type, char *buffer, size_t size)
 		return 0;
 
 	if (status)
-		log_error("Metadata inconsistency: Not all flags successfully "
-			  "exported.");
+		log_warn(INTERNAL_ERROR "Metadata inconsistency: "
+			 "Not all flags successfully exported.");
 
 	return 1;
 }

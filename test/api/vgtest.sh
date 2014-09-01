@@ -1,3 +1,4 @@
+#!/bin/sh
 # Copyright (C) 2008 Red Hat, Inc. All rights reserved.
 #
 # This copyrighted material is made available to anyone wishing to use,
@@ -12,7 +13,8 @@
 # tests lvm2app library
 #
 
-. lib/test
-aux prepare_devs 2
-pvcreate $dev1 $dev2
-aux apitest vgtest $vg1 $dev1 $dev2
+. lib/inittest
+
+aux prepare_pvs 2
+
+aux apitest vgtest $vg1 "$dev1" "$dev2"

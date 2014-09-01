@@ -14,10 +14,8 @@
  */
 
 #include "tools.h"
-#include "lv_alloc.h"
-#include "xlate.h"
-
 #include <sys/stat.h>
+#include <signal.h>
 #include <sys/wait.h>
 
 const char *command_name(struct cmd_context *cmd)
@@ -25,11 +23,90 @@ const char *command_name(struct cmd_context *cmd)
 	return cmd->command->name;
 }
 
+static void _sigchld_handler(int sig __attribute__((unused)))
+{
+	while (wait4(-1, NULL, WNOHANG | WUNTRACED, NULL) > 0) ;
+}
+
+/*
+ * returns:
+ * -1 if the fork failed
+ *  0 if the parent
+ *  1 if the child
+ */
+int become_daemon(struct cmd_context *cmd, int skip_lvm)
+{
+	static const char devnull[] = "/dev/null";
+	int null_fd;
+	pid_t pid;
+	struct sigaction act = {
+		{_sigchld_handler},
+		.sa_flags = SA_NOCLDSTOP,
+	};
+
+	log_verbose("Forking background process: %s", cmd->cmd_line);
+
+	sigaction(SIGCHLD, &act, NULL);
+
+	if (!skip_lvm)
+		sync_local_dev_names(cmd); /* Flush ops and reset dm cookie */
+
+	if ((pid = fork()) == -1) {
+		log_error("fork failed: %s", strerror(errno));
+		return -1;
+	}
+
+	/* Parent */
+	if (pid > 0)
+		return 0;
+
+	/* Child */
+	if (setsid() == -1)
+		log_error("Background process failed to setsid: %s",
+			  strerror(errno));
+
+/* Set this to avoid discarding output from background process */
+// #define DEBUG_CHILD
+
+#ifndef DEBUG_CHILD
+	if ((null_fd = open(devnull, O_RDWR)) == -1) {
+		log_sys_error("open", devnull);
+		_exit(ECMD_FAILED);
+	}
+
+	if ((dup2(null_fd, STDIN_FILENO) < 0)  || /* reopen stdin */
+	    (dup2(null_fd, STDOUT_FILENO) < 0) || /* reopen stdout */
+	    (dup2(null_fd, STDERR_FILENO) < 0)) { /* reopen stderr */
+		log_sys_error("dup2", "redirect");
+		(void) close(null_fd);
+		_exit(ECMD_FAILED);
+	}
+
+	if (null_fd > STDERR_FILENO)
+		(void) close(null_fd);
+
+	init_verbose(VERBOSE_BASE_LEVEL);
+#endif	/* DEBUG_CHILD */
+
+	strncpy(*cmd->argv, "(lvm2)", strlen(*cmd->argv));
+
+	if (!skip_lvm) {
+		reset_locking();
+		lvmcache_destroy(cmd, 1, 1);
+		if (!lvmcache_init())
+			/* FIXME Clean up properly here */
+			_exit(ECMD_FAILED);
+	}
+	dev_close_all();
+
+	return 1;
+}
+
 /*
  * Strip dev_dir if present
  */
 const char *skip_dev_dir(struct cmd_context *cmd, const char *vg_name,
-		   unsigned *dev_dir_found)
+			 unsigned *dev_dir_found)
 {
 	const char *dmdir = dm_dir();
 	size_t dmdir_len = strlen(dmdir), vglv_sz;
@@ -80,20 +157,42 @@ const char *skip_dev_dir(struct cmd_context *cmd, const char *vg_name,
 }
 
 /*
+ * Returns 1 if VG should be ignored.
+ */
+int ignore_vg(struct volume_group *vg, const char *vg_name, int allow_inconsistent, int *ret)
+{
+	uint32_t read_error = vg_read_error(vg);
+
+	if (!read_error)
+		return 0;
+
+	if ((read_error == FAILED_INCONSISTENT) && allow_inconsistent)
+		return 0;
+
+	if (read_error == FAILED_CLUSTERED && vg->cmd->ignore_clustered_vgs)
+		log_verbose("Skipping volume group %s", vg_name);
+	else {
+		log_error("Skipping volume group %s", vg_name);
+		*ret = ECMD_FAILED;
+	}
+
+	return 1;
+}
+
+/*
  * Metadata iteration functions
  */
 int process_each_lv_in_vg(struct cmd_context *cmd,
 			  struct volume_group *vg,
 			  const struct dm_list *arg_lvnames,
-			  const struct dm_list *tags,
+			  const struct dm_list *tagsl,
 			  struct dm_list *failed_lvnames,
 			  void *handle,
 			  process_single_lv_fn_t process_single_lv)
 {
 	int ret_max = ECMD_PROCESSED;
-	int ret = 0;
+	int ret;
 	unsigned process_all = 0;
-	unsigned process_lv = 0;
 	unsigned tags_supplied = 0;
 	unsigned lvargs_supplied = 0;
 	unsigned lvargs_matched = 0;
@@ -103,7 +202,7 @@ int process_each_lv_in_vg(struct cmd_context *cmd,
 	if (!vg_check_status(vg, EXPORTED_VG))
 		return ECMD_FAILED;
 
-	if (tags && !dm_list_empty(tags))
+	if (tagsl && !dm_list_empty(tagsl))
 		tags_supplied = 1;
 
 	if (arg_lvnames && !dm_list_empty(arg_lvnames))
@@ -112,12 +211,10 @@ int process_each_lv_in_vg(struct cmd_context *cmd,
 	/* Process all LVs in this VG if no restrictions given */
 	if (!tags_supplied && !lvargs_supplied)
 		process_all = 1;
-
 	/* Or if VG tags match */
-	if (!process_lv && tags_supplied &&
-	    str_list_match_list(tags, &vg->tags, NULL)) {
+	else if (tags_supplied &&
+		 str_list_match_list(tagsl, &vg->tags, NULL))
 		process_all = 1;
-	}
 
 	/*
 	 * FIXME: In case of remove it goes through deleted entries,
@@ -129,7 +226,7 @@ int process_each_lv_in_vg(struct cmd_context *cmd,
 
 		/* Skip availability change for non-virt snaps when processing all LVs */
 		/* FIXME: pass process_all to process_single_lv() */
-		if (process_all && arg_count(cmd, available_ARG) &&
+		if (process_all && arg_count(cmd, activate_ARG) &&
 		    lv_is_cow(lvl->lv) && !lv_is_virtual_origin(origin_from_cow(lvl->lv)))
 			continue;
 
@@ -143,27 +240,19 @@ int process_each_lv_in_vg(struct cmd_context *cmd,
 		if (!lvargs_supplied && !lv_is_visible(lvl->lv) && !arg_count(cmd, all_ARG))
 			continue;
 
-		/* Should we process this LV? */
-		if (process_all)
-			process_lv = 1;
-		else
-			process_lv = 0;
-
-		/* LV tag match? */
-		if (!process_lv && tags_supplied &&
-		    str_list_match_list(tags, &lvl->lv->tags, NULL)) {
-			process_lv = 1;
-		}
-
 		/* LV name match? */
 		if (lvargs_supplied &&
-		    str_list_match_item(arg_lvnames, lvl->lv->name)) {
-			process_lv = 1;
+		    str_list_match_item(arg_lvnames, lvl->lv->name))
+			/* Check even when process_all for counter */
 			lvargs_matched++;
-		}
-
-		if (!process_lv)
+		/* LV tag match?   skip test, when process_all */
+		else if (!process_all &&
+			 (!tags_supplied ||
+			  !str_list_match_list(tagsl, &lvl->lv->tags, NULL)))
 			continue;
+
+		if (sigint_caught())
+			return_ECMD_FAILED;
 
 		lvl->lv->vg->cmd_missing_vgs = 0;
 		ret = process_single_lv(cmd, lvl->lv, handle);
@@ -179,10 +268,6 @@ int process_each_lv_in_vg(struct cmd_context *cmd,
 		}
 		if (ret > ret_max)
 			ret_max = ret;
-		if (sigint_caught()) {
-			stack;
-			return ret_max;
-		}
 	}
 
 	if (lvargs_supplied && lvargs_matched != dm_list_size(arg_lvnames)) {
@@ -204,15 +289,15 @@ int process_each_lv(struct cmd_context *cmd, int argc, char **argv,
 {
 	int opt = 0;
 	int ret_max = ECMD_PROCESSED;
-	int ret = 0;
+	int ret;
 
 	struct dm_list *tags_arg;
 	struct dm_list *vgnames;	/* VGs to process */
-	struct str_list *sll, *strl;
+	struct dm_str_list *sll, *strl;
 	struct cmd_vg *cvl_vg;
 	struct dm_list cmd_vgs;
 	struct dm_list failed_lvnames;
-	struct dm_list tags, lvnames;
+	struct dm_list tagsl, lvnames;
 	struct dm_list arg_lvnames;	/* Cmdline vgname or vgname/lvname */
 	struct dm_list arg_vgnames;
 	char *vglv;
@@ -220,7 +305,7 @@ int process_each_lv(struct cmd_context *cmd, int argc, char **argv,
 
 	const char *vgname;
 
-	dm_list_init(&tags);
+	dm_list_init(&tagsl);
 	dm_list_init(&arg_lvnames);
 	dm_list_init(&failed_lvnames);
 
@@ -243,7 +328,7 @@ int process_each_lv(struct cmd_context *cmd, int argc, char **argv,
 						  vgname);
 					continue;
 				}
-				if (!str_list_add(cmd->mem, &tags,
+				if (!str_list_add(cmd->mem, &tagsl,
 						  dm_pool_strdup(cmd->mem,
 							      vgname + 1))) {
 					log_error("strlist allocation failed");
@@ -311,7 +396,7 @@ int process_each_lv(struct cmd_context *cmd, int argc, char **argv,
 		vgnames = &arg_vgnames;
 	}
 
-	if (!argc || !dm_list_empty(&tags)) {
+	if (!argc || !dm_list_empty(&tagsl)) {
 		log_verbose("Finding all logical volumes");
 		if (!lvmetad_vg_list_to_lvmcache(cmd))
 			stack;
@@ -325,22 +410,18 @@ int process_each_lv(struct cmd_context *cmd, int argc, char **argv,
 		vgname = strl->str;
 		dm_list_init(&cmd_vgs);
 		if (!(cvl_vg = cmd_vg_add(cmd->mem, &cmd_vgs,
-					  vgname, NULL, flags))) {
-			stack;
-			return ECMD_FAILED;
-		}
+					  vgname, NULL, flags)))
+			return_ECMD_FAILED;
 
 		if (!cmd_vg_read(cmd, &cmd_vgs)) {
-			free_cmd_vgs(&cmd_vgs);
-			if (ret_max < ECMD_FAILED) {
-				log_error("Skipping volume group %s", vgname);
-				ret_max = ECMD_FAILED;
-			} else
+			if (ignore_vg(cvl_vg->vg, vgname, 0, &ret_max))
 				stack;
+
+			free_cmd_vgs(&cmd_vgs);
 			continue;
 		}
 
-		tags_arg = &tags;
+		tags_arg = &tagsl;
 		dm_list_init(&lvnames);	/* LVs to be processed in this VG */
 		dm_list_iterate_items(sll, &arg_lvnames) {
 			const char *vg_name = sll->str;
@@ -363,7 +444,10 @@ int process_each_lv(struct cmd_context *cmd, int argc, char **argv,
 			}
 		}
 
-		while (!sigint_caught()) {
+		for (;;) {
+			if (sigint_caught())
+				return_ECMD_FAILED;
+
 			ret = process_each_lv_in_vg(cmd, cvl_vg->vg, &lvnames,
 						    tags_arg, &failed_lvnames,
 						    handle, process_single_lv);
@@ -390,11 +474,6 @@ int process_each_lv(struct cmd_context *cmd, int argc, char **argv,
 			ret_max = ret;
 
 		free_cmd_vgs(&cmd_vgs);
-		/* FIXME: logic for breaking command is not consistent */
-		if (sigint_caught()) {
-			stack;
-			return ECMD_FAILED;
-		}
 	}
 
 	return ret_max;
@@ -418,10 +497,10 @@ int process_each_segment_in_pv(struct cmd_context *cmd,
 		vg_name = pv_vg_name(pv);
 
 		vg = vg_read(cmd, vg_name, NULL, 0);
-		if (vg_read_error(vg)) {
+		if (ignore_vg(vg, vg_name, 0, &ret_max)) {
 			release_vg(vg);
-			log_error("Skipping volume group %s", vg_name);
-			return ECMD_FAILED;
+			stack;
+			return ret_max;
 		}
 
 		/*
@@ -444,11 +523,14 @@ int process_each_segment_in_pv(struct cmd_context *cmd,
 			ret_max = ret;
 	} else
 		dm_list_iterate_items(pvseg, &pv->segments) {
+			if (sigint_caught()) {
+				ret_max = ECMD_FAILED;
+				stack;
+				break;
+			}
 			ret = process_single_pvseg(cmd, vg, pvseg, handle);
 			if (ret > ret_max)
 				ret_max = ret;
-			if (sigint_caught())
-				break;
 		}
 
 	if (vg_name)
@@ -469,12 +551,11 @@ int process_each_segment_in_lv(struct cmd_context *cmd,
 	int ret;
 
 	dm_list_iterate_items(seg, &lv->segments) {
+		if (sigint_caught())
+			return_ECMD_FAILED;
 		ret = process_single_seg(cmd, seg, handle);
 		if (ret > ret_max)
 			ret_max = ret;
-		/* FIXME: logic for breaking command is not consistent */
-		if (sigint_caught())
-			return ECMD_FAILED;
 	}
 
 	return ret_max;
@@ -482,39 +563,39 @@ int process_each_segment_in_lv(struct cmd_context *cmd,
 
 static int _process_one_vg(struct cmd_context *cmd, const char *vg_name,
 			   const char *vgid,
-			   struct dm_list *tags, struct dm_list *arg_vgnames,
+			   struct dm_list *tagsl, struct dm_list *arg_vgnames,
 			   uint32_t flags, void *handle, int ret_max,
 			   process_single_vg_fn_t process_single_vg)
 {
 	struct dm_list cmd_vgs;
 	struct cmd_vg *cvl_vg;
-	int ret = 0;
+	int ret = ECMD_PROCESSED;
 
 	log_verbose("Finding volume group \"%s\"", vg_name);
 
 	dm_list_init(&cmd_vgs);
 	if (!(cvl_vg = cmd_vg_add(cmd->mem, &cmd_vgs, vg_name, vgid, flags)))
-		return_0;
+		return_ECMD_FAILED;
 
 	for (;;) {
-		/* FIXME: consistent handling of command break */
 		if (sigint_caught()) {
 			ret = ECMD_FAILED;
+			stack;
 			break;
 		}
-		if (!cmd_vg_read(cmd, &cmd_vgs))
+
+		if (!cmd_vg_read(cmd, &cmd_vgs)) {
 			/* Allow FAILED_INCONSISTENT through only for vgcfgrestore */
-			if (vg_read_error(cvl_vg->vg) &&
-			    (!((flags & READ_ALLOW_INCONSISTENT) &&
-			       (vg_read_error(cvl_vg->vg) == FAILED_INCONSISTENT)))) {
-				ret = ECMD_FAILED;
+			if (ignore_vg(cvl_vg->vg, vg_name, flags & READ_ALLOW_INCONSISTENT, &ret)) {
+				stack;
 				break;
 			}
+		}
 
-		if (!dm_list_empty(tags) &&
+		if (!dm_list_empty(tagsl) &&
 		    /* Only process if a tag matches or it's on arg_vgnames */
 		    !str_list_match_item(arg_vgnames, vg_name) &&
-		    !str_list_match_list(tags, &cvl_vg->vg->tags, NULL))
+		    !str_list_match_list(tagsl, &cvl_vg->vg->tags, NULL))
 			break;
 
 		ret = process_single_vg(cmd, vg_name, cvl_vg->vg, handle);
@@ -540,13 +621,13 @@ int process_each_vg(struct cmd_context *cmd, int argc, char **argv,
 	int opt = 0;
 	int ret_max = ECMD_PROCESSED;
 
-	struct str_list *sl;
+	struct dm_str_list *sl;
 	struct dm_list *vgnames, *vgids;
-	struct dm_list arg_vgnames, tags;
+	struct dm_list arg_vgnames, tagsl;
 
 	const char *vg_name, *vgid;
 
-	dm_list_init(&tags);
+	dm_list_init(&tagsl);
 	dm_list_init(&arg_vgnames);
 
 	if (argc) {
@@ -562,7 +643,7 @@ int process_each_vg(struct cmd_context *cmd, int argc, char **argv,
 						ret_max = EINVALID_CMD_LINE;
 					continue;
 				}
-				if (!str_list_add(cmd->mem, &tags,
+				if (!str_list_add(cmd->mem, &tagsl,
 						  dm_pool_strdup(cmd->mem,
 							      vg_name + 1))) {
 					log_error("strlist allocation failed");
@@ -589,7 +670,7 @@ int process_each_vg(struct cmd_context *cmd, int argc, char **argv,
 		vgnames = &arg_vgnames;
 	}
 
-	if (!argc || !dm_list_empty(&tags)) {
+	if (!argc || !dm_list_empty(&tagsl)) {
 		log_verbose("Finding all volume groups");
 		if (!lvmetad_vg_list_to_lvmcache(cmd))
 			stack;
@@ -598,27 +679,27 @@ int process_each_vg(struct cmd_context *cmd, int argc, char **argv,
 			return ret_max;
 		}
 		dm_list_iterate_items(sl, vgids) {
+			if (sigint_caught())
+				return_ECMD_FAILED;
 			vgid = sl->str;
-			if (!(vgid) || !(vg_name = lvmcache_vgname_from_vgid(cmd->mem, vgid)))
+			if (!vgid || !(vg_name = lvmcache_vgname_from_vgid(cmd->mem, vgid)))
 				continue;
-			ret_max = _process_one_vg(cmd, vg_name, vgid, &tags,
+			ret_max = _process_one_vg(cmd, vg_name, vgid, &tagsl,
 						  &arg_vgnames,
 						  flags, handle,
 					  	  ret_max, process_single_vg);
-			if (sigint_caught())
-				return ret_max;
 		}
 	} else {
 		dm_list_iterate_items(sl, vgnames) {
+			if (sigint_caught())
+				return_ECMD_FAILED;
 			vg_name = sl->str;
 			if (is_orphan_vg(vg_name))
 				continue;	/* FIXME Unnecessary? */
-			ret_max = _process_one_vg(cmd, vg_name, NULL, &tags,
+			ret_max = _process_one_vg(cmd, vg_name, NULL, &tagsl,
 						  &arg_vgnames,
 						  flags, handle,
 					  	  ret_max, process_single_vg);
-			if (sigint_caught())
-				return ret_max;
 		}
 	}
 
@@ -626,22 +707,22 @@ int process_each_vg(struct cmd_context *cmd, int argc, char **argv,
 }
 
 int process_each_pv_in_vg(struct cmd_context *cmd, struct volume_group *vg,
-			  const struct dm_list *tags, void *handle,
+			  const struct dm_list *tagsl, void *handle,
 			  process_single_pv_fn_t process_single_pv)
 {
 	int ret_max = ECMD_PROCESSED;
-	int ret = 0;
+	int ret;
 	struct pv_list *pvl;
 
 	dm_list_iterate_items(pvl, &vg->pvs) {
-		if (tags && !dm_list_empty(tags) &&
-		    !str_list_match_list(tags, &pvl->pv->tags, NULL)) {
+		if (sigint_caught())
+			return_ECMD_FAILED;
+		if (tagsl && !dm_list_empty(tagsl) &&
+		    !str_list_match_list(tagsl, &pvl->pv->tags, NULL)) {
 			continue;
 		}
 		if ((ret = process_single_pv(cmd, vg, pvl->pv, handle)) > ret_max)
 			ret_max = ret;
-		if (sigint_caught())
-			return ret_max;
 	}
 
 	return ret_max;
@@ -650,44 +731,55 @@ int process_each_pv_in_vg(struct cmd_context *cmd, struct volume_group *vg,
 static int _process_all_devs(struct cmd_context *cmd, void *handle,
 			     process_single_pv_fn_t process_single_pv)
 {
+	struct pv_list *pvl;
+	struct dm_list *pvslist;
 	struct physical_volume *pv;
 	struct physical_volume pv_dummy;
 	struct dev_iter *iter;
 	struct device *dev;
 
 	int ret_max = ECMD_PROCESSED;
-	int ret = 0;
+	int ret;
 
-	if (!scan_vgs_for_pvs(cmd, 1)) {
-		stack;
-		return ECMD_FAILED;
-	}
+	lvmcache_seed_infos_from_lvmetad(cmd);
+	if (!(pvslist = get_pvs(cmd)))
+		return_ECMD_FAILED;
 
 	if (!(iter = dev_iter_create(cmd->filter, 1))) {
 		log_error("dev_iter creation failed");
 		return ECMD_FAILED;
 	}
 
-	while ((dev = dev_iter_get(iter))) {
-		if (!(pv = pv_read(cmd, dev_name(dev), 0, 0))) {
-			memset(&pv_dummy, 0, sizeof(pv_dummy));
-			dm_list_init(&pv_dummy.tags);
-			dm_list_init(&pv_dummy.segments);
-			pv_dummy.dev = dev;
-			pv_dummy.fmt = NULL;
-			pv = &pv_dummy;
+	while ((dev = dev_iter_get(iter)))
+	{
+		if (sigint_caught()) {
+			ret_max = ECMD_FAILED;
+			stack;
+			break;
 		}
-		ret = process_single_pv(cmd, NULL, pv, handle);
 
-		free_pv_fid(pv);
+		memset(&pv_dummy, 0, sizeof(pv_dummy));
+		dm_list_init(&pv_dummy.tags);
+		dm_list_init(&pv_dummy.segments);
+		pv_dummy.dev = dev;
+		pv = &pv_dummy;
+
+		/* TODO use a device-indexed hash here */
+		dm_list_iterate_items(pvl, pvslist)
+			if (pvl->pv->dev == dev)
+				pv = pvl->pv;
+
+		ret = process_single_pv(cmd, NULL, pv, handle);
 
 		if (ret > ret_max)
 			ret_max = ret;
-		if (sigint_caught())
-			break;
+
+		free_pv_fid(pv);
 	}
 
 	dev_iter_destroy(iter);
+	dm_list_iterate_items(pvl, pvslist)
+		free_pv_fid(pvl->pv);
 
 	return ret_max;
 }
@@ -704,20 +796,20 @@ int process_each_pv(struct cmd_context *cmd, int argc, char **argv,
 {
 	int opt = 0;
 	int ret_max = ECMD_PROCESSED;
-	int ret = 0;
-	int lock_global = !(flags & READ_WITHOUT_LOCK) && !(flags & READ_FOR_UPDATE);
+	int ret;
+	int lock_global = !(flags & READ_WITHOUT_LOCK) && !(flags & READ_FOR_UPDATE) && !lvmetad_active();
 
 	struct pv_list *pvl;
 	struct physical_volume *pv;
-	struct dm_list *pvslist, *vgnames;
-	struct dm_list tags;
-	struct str_list *sll;
+	struct dm_list *pvslist = NULL, *vgnames;
+	struct dm_list tagsl;
+	struct dm_str_list *sll;
 	char *at_sign, *tagname;
-	int scanned = 0;
+	struct device *dev;
 
-	dm_list_init(&tags);
+	dm_list_init(&tagsl);
 
-	if (lock_global && !lock_vol(cmd, VG_GLOBAL, LCK_VG_READ)) {
+	if (lock_global && !lock_vol(cmd, VG_GLOBAL, LCK_VG_READ, NULL)) {
 		log_error("Unable to obtain global lock.");
 		return ECMD_FAILED;
 	}
@@ -725,6 +817,10 @@ int process_each_pv(struct cmd_context *cmd, int argc, char **argv,
 	if (argc) {
 		log_verbose("Using physical volume(s) on command line");
 		for (; opt < argc; opt++) {
+			if (sigint_caught()) {
+				ret_max = ECMD_FAILED;
+				goto_out;
+			}
 			dm_unescape_colons_and_at_signs(argv[opt], NULL, &at_sign);
 			if (at_sign && (at_sign == argv[opt])) {
 				tagname = at_sign + 1;
@@ -736,7 +832,7 @@ int process_each_pv(struct cmd_context *cmd, int argc, char **argv,
 						ret_max = EINVALID_CMD_LINE;
 					continue;
 				}
-				if (!str_list_add(cmd->mem, &tags,
+				if (!str_list_add(cmd->mem, &tagsl,
 						  dm_pool_strdup(cmd->mem,
 							      tagname))) {
 					log_error("strlist allocation failed");
@@ -755,97 +851,68 @@ int process_each_pv(struct cmd_context *cmd, int argc, char **argv,
 				}
 				pv = pvl->pv;
 			} else {
-				if (!(pv = pv_read(cmd, argv[opt],
-						   1, scan_label_only))) {
-					log_error("Failed to read physical "
-						  "volume \"%s\"", argv[opt]);
+				if (!pvslist) {
+					lvmcache_seed_infos_from_lvmetad(cmd);
+					if (!(pvslist = get_pvs(cmd)))
+						goto bad;
+				}
+
+				if (!(dev = dev_cache_get(argv[opt], cmd->filter))) {
+					log_error("Failed to find device "
+						  "\"%s\"", argv[opt]);
 					ret_max = ECMD_FAILED;
 					continue;
 				}
 
-				/*
-				 * If a PV has no MDAs it may appear to be an
-				 * orphan until the metadata is read off
-				 * another PV in the same VG.  Detecting this
-				 * means checking every VG by scanning every
-				 * PV on the system.
-				 */
-				if (!scanned && is_orphan(pv) &&
-				    !dm_list_size(&pv->fid->metadata_areas_in_use) &&
-				    !dm_list_size(&pv->fid->metadata_areas_ignored)) {
-					if (!scan_label_only &&
-					    !scan_vgs_for_pvs(cmd, 1)) {
-						stack;
-						ret_max = ECMD_FAILED;
-						continue;
-					}
-					scanned = 1;
-					free_pv_fid(pv);
-					if (!(pv = pv_read(cmd, argv[opt],
-							   1,
-							   scan_label_only))) {
-						log_error("Failed to read "
-							  "physical volume "
-							  "\"%s\"", argv[opt]);
-						ret_max = ECMD_FAILED;
-						continue;
-					}
+				pv = NULL;
+				dm_list_iterate_items(pvl, pvslist)
+					if (pvl->pv->dev == dev)
+						pv = pvl->pv;
+
+				if (!pv) {
+					log_error("Failed to find physical volume "
+						  "\"%s\"", argv[opt]);
+					ret_max = ECMD_FAILED;
+					continue;
 				}
 			}
 
 			ret = process_single_pv(cmd, vg, pv, handle);
 
-			/*
-			 * Free PV only if we called pv_read before,
-			 * otherwise the PV structure is part of the VG.
-			 */
-			if (!vg)
-				free_pv_fid(pv);
-
 			if (ret > ret_max)
 				ret_max = ret;
-			if (sigint_caught())
-				goto out;
 		}
-		if (!dm_list_empty(&tags) && (vgnames = get_vgnames(cmd, 1)) &&
+		if (!dm_list_empty(&tagsl) && (vgnames = get_vgnames(cmd, 1)) &&
 			   !dm_list_empty(vgnames)) {
 			dm_list_iterate_items(sll, vgnames) {
-				vg = vg_read(cmd, sll->str, NULL, flags);
-				if (vg_read_error(vg)) {
+				if (sigint_caught()) {
 					ret_max = ECMD_FAILED;
+					goto_out;
+				}
+				vg = vg_read(cmd, sll->str, NULL, flags);
+				if (ignore_vg(vg, sll->str, 0, &ret_max)) {
 					release_vg(vg);
 					stack;
 					continue;
 				}
 
-				ret = process_each_pv_in_vg(cmd, vg, &tags,
+				ret = process_each_pv_in_vg(cmd, vg, &tagsl,
 							    handle,
 							    process_single_pv);
-
-				unlock_and_release_vg(cmd, vg, sll->str);
-
 				if (ret > ret_max)
 					ret_max = ret;
-				if (sigint_caught())
-					goto out;
+
+				unlock_and_release_vg(cmd, vg, sll->str);
 			}
 		}
 	} else {
 		if (vg) {
 			log_verbose("Using all physical volume(s) in "
 				    "volume group");
-			ret = process_each_pv_in_vg(cmd, vg, NULL, handle,
-						    process_single_pv);
-			if (ret > ret_max)
-				ret_max = ret;
-			if (sigint_caught())
-				goto out;
+			ret_max = process_each_pv_in_vg(cmd, vg, NULL, handle,
+							process_single_pv);
 		} else if (arg_count(cmd, all_ARG)) {
-			ret = _process_all_devs(cmd, handle, process_single_pv);
-			if (ret > ret_max)
-				ret_max = ret;
-			if (sigint_caught())
-				goto out;
+			ret_max = _process_all_devs(cmd, handle, process_single_pv);
 		} else {
 			log_verbose("Scanning for physical volume names");
 
@@ -854,17 +921,24 @@ int process_each_pv(struct cmd_context *cmd, int argc, char **argv,
 				goto bad;
 
 			dm_list_iterate_items(pvl, pvslist) {
+				if (sigint_caught()) {
+					ret_max = ECMD_FAILED;
+					goto_out;
+				}
 				ret = process_single_pv(cmd, NULL, pvl->pv,
 						     handle);
-				free_pv_fid(pvl->pv);
 				if (ret > ret_max)
 					ret_max = ret;
-				if (sigint_caught())
-					goto out;
+
+				free_pv_fid(pvl->pv);
 			}
 		}
 	}
 out:
+	if (pvslist)
+		dm_list_iterate_items(pvl, pvslist)
+			free_pv_fid(pvl->pv);
+
 	if (lock_global)
 		unlock_vg(cmd, VG_GLOBAL);
 	return ret_max;
@@ -1000,17 +1074,18 @@ static int xstrtouint32(const char *s, char **p, int base, uint32_t *result)
 
 	errno = 0;
 	ul = strtoul(s, p, base);
-	if (errno || *p == s || (uint32_t) ul != ul)
-		return -1;
+	if (errno || *p == s || ul > UINT32_MAX)
+		return 0;
 	*result = ul;
-	return 0;
+
+	return 1;
 }
 
 static int _parse_pes(struct dm_pool *mem, char *c, struct dm_list *pe_ranges,
 		      const char *pvname, uint32_t size)
 {
 	char *endptr;
-	uint32_t start, end;
+	uint32_t start, end, len;
 
 	/* Default to whole PV */
 	if (!c) {
@@ -1035,7 +1110,7 @@ static int _parse_pes(struct dm_pool *mem, char *c, struct dm_list *pe_ranges,
 
 		/* Start extent given? */
 		if (isdigit(*c)) {
-			if (xstrtouint32(c, &endptr, 10, &start))
+			if (!xstrtouint32(c, &endptr, 10, &start))
 				goto error;
 			c = endptr;
 			/* Just one number given? */
@@ -1046,11 +1121,20 @@ static int _parse_pes(struct dm_pool *mem, char *c, struct dm_list *pe_ranges,
 		if (*c == '-') {
 			c++;
 			if (isdigit(*c)) {
-				if (xstrtouint32(c, &endptr, 10, &end))
+				if (!xstrtouint32(c, &endptr, 10, &end))
 					goto error;
 				c = endptr;
 			}
+		} else if (*c == '+') {	/* Length? */
+			c++;
+			if (isdigit(*c)) {
+				if (!xstrtouint32(c, &endptr, 10, &len))
+					goto error;
+				c = endptr;
+				end = start + (len ? (len - 1) : 0);
+			}
 		}
+
 		if (*c && *c != ':')
 			goto error;
 
@@ -1081,18 +1165,18 @@ static int _create_pv_entry(struct dm_pool *mem, struct pv_list *pvl,
 
 	pvname = pv_dev_name(pvl->pv);
 	if (allocatable_only && !(pvl->pv->status & ALLOCATABLE_PV)) {
-		log_error("Physical volume %s not allocatable", pvname);
+		log_warn("Physical volume %s not allocatable.", pvname);
 		return 1;
 	}
 
 	if (allocatable_only && is_missing_pv(pvl->pv)) {
-		log_error("Physical volume %s is missing", pvname);
+		log_warn("Physical volume %s is missing.", pvname);
 		return 1;
 	}
 
 	if (allocatable_only &&
 	    (pvl->pv->pe_count == pvl->pv->pe_alloc_count)) {
-		log_error("No free extents on physical volume \"%s\"", pvname);
+		log_warn("No free extents on physical volume \"%s\".", pvname);
 		return 1;
 	}
 
@@ -1132,7 +1216,7 @@ struct dm_list *create_pv_list(struct dm_pool *mem, struct volume_group *vg, int
 {
 	struct dm_list *r;
 	struct pv_list *pvl;
-	struct dm_list tags, arg_pvnames;
+	struct dm_list tagsl, arg_pvnames;
 	char *pvname = NULL;
 	char *colon, *at_sign, *tagname;
 	int i;
@@ -1144,7 +1228,7 @@ struct dm_list *create_pv_list(struct dm_pool *mem, struct volume_group *vg, int
 	}
 	dm_list_init(r);
 
-	dm_list_init(&tags);
+	dm_list_init(&tagsl);
 	dm_list_init(&arg_pvnames);
 
 	for (i = 0; i < argc; i++) {
@@ -1269,23 +1353,23 @@ int vgcreate_params_set_from_args(struct cmd_context *cmd,
 
 	if (arg_sign_value(cmd, physicalextentsize_ARG, SIGN_NONE) == SIGN_MINUS) {
 		log_error("Physical extent size may not be negative");
-		return 1;
+		return 0;
 	}
 
 	if (arg_uint64_value(cmd, physicalextentsize_ARG, 0) > MAX_EXTENT_SIZE) {
 		log_error("Physical extent size cannot be larger than %s",
 				  display_size(cmd, (uint64_t) MAX_EXTENT_SIZE));
-		return 1;
+		return 0;
 	}
 
 	if (arg_sign_value(cmd, maxlogicalvolumes_ARG, SIGN_NONE) == SIGN_MINUS) {
 		log_error("Max Logical Volumes may not be negative");
-		return 1;
+		return 0;
 	}
 
 	if (arg_sign_value(cmd, maxphysicalvolumes_ARG, SIGN_NONE) == SIGN_MINUS) {
 		log_error("Max Physical Volumes may not be negative");
-		return 1;
+		return 0;
 	}
 
 	if (arg_count(cmd, metadatacopies_ARG)) {
@@ -1295,31 +1379,73 @@ int vgcreate_params_set_from_args(struct cmd_context *cmd,
 		vp_new->vgmetadatacopies = arg_int_value(cmd, vgmetadatacopies_ARG,
 							DEFAULT_VGMETADATACOPIES);
 	} else {
-		vp_new->vgmetadatacopies = find_config_tree_int(cmd,
-						   "metadata/vgmetadatacopies",
-						   DEFAULT_VGMETADATACOPIES);
+		vp_new->vgmetadatacopies = find_config_tree_int(cmd, metadata_vgmetadatacopies_CFG, NULL);
 	}
 
-	return 0;
+	return 1;
+}
+
+/* Shared code for changing activation state for vgchange/lvchange */
+int lv_change_activate(struct cmd_context *cmd, struct logical_volume *lv,
+		       activation_change_t activate)
+{
+	int r = 1;
+
+	if (lv_is_merging_origin(lv)) {
+		/*
+		 * For merging origin, its snapshot must be inactive.
+		 * If it's still active and cannot be deactivated
+		 * activation or deactivation of origin fails!
+		 *
+		 * When origin is deactivated and merging snapshot is thin
+		 * it allows to deactivate origin, but still report error,
+		 * since the thin snapshot remains active.
+		 *
+		 * User could retry to deactivate it with another
+		 * deactivation of origin, which is the only visible LV
+		 */
+		if (!deactivate_lv(cmd, find_snapshot(lv)->lv)) {
+			if (is_change_activating(activate)) {
+				log_error("Refusing to activate merging \"%s\" while snapshot \"%s\" is still active.",
+					  lv->name, find_snapshot(lv)->lv->name);
+				return 0;
+			}
+
+			log_error("Cannot fully deactivate merging origin \"%s\" while snapshot \"%s\" is still active.",
+				  lv->name, find_snapshot(lv)->lv->name);
+			r = 0; /* and continue to deactivate origin... */
+		}
+	}
+
+	if (!lv_active_change(cmd, lv, activate))
+		return_0;
+
+	if (background_polling() &&
+	    is_change_activating(activate) &&
+	    (lv->status & (PVMOVE|CONVERTING|MERGING)))
+		lv_spawn_background_polling(cmd, lv);
+
+	return r;
 }
 
 int lv_refresh(struct cmd_context *cmd, struct logical_volume *lv)
 {
-	int r = 0;
-
 	if (!cmd->partial_activation && (lv->status & PARTIAL_LV)) {
-		log_error("Refusing refresh of partial LV %s. Use --partial to override.",
+		log_error("Refusing refresh of partial LV %s."
+			  " Use '--activationmode partial' to override.",
 			  lv->name);
-		goto out;
+		return 0;
 	}
 
-	r = suspend_lv(cmd, lv);
-	if (!r)
-		goto_out;
+	if (!suspend_lv(cmd, lv)) {
+		log_error("Failed to suspend %s.", lv->name);
+		return 0;
+	}
 
-	r = resume_lv(cmd, lv);
-	if (!r)
-		goto_out;
+	if (!resume_lv(cmd, lv)) {
+		log_error("Failed to reactivate %s.", lv->name);
+		return 0;
+	}
 
 	/*
 	 * check if snapshot merge should be polled
@@ -1330,11 +1456,10 @@ int lv_refresh(struct cmd_context *cmd, struct logical_volume *lv)
 	 * - fortunately: polldaemon will immediately shutdown if the
 	 *   origin doesn't have a status with a snapshot percentage
 	 */
-	if (background_polling() && lv_is_origin(lv) && lv_is_merging_origin(lv))
+	if (background_polling() && lv_is_merging_origin(lv) && lv_is_active_locally(lv))
 		lv_spawn_background_polling(cmd, lv);
 
-out:
-	return r;
+	return 1;
 }
 
 int vg_refresh_visible(struct cmd_context *cmd, struct volume_group *vg)
@@ -1344,12 +1469,16 @@ int vg_refresh_visible(struct cmd_context *cmd, struct volume_group *vg)
 
 	sigint_allow();
 	dm_list_iterate_items(lvl, &vg->lvs) {
-		if (sigint_caught())
-			return_0;
+		if (sigint_caught()) {
+			r = 0;
+			stack;
+			break;
+		}
 
-		if (lv_is_visible(lvl->lv))
-			if (!lv_refresh(cmd, lvl->lv))
-				r = 0;
+		if (lv_is_visible(lvl->lv) && !lv_refresh(cmd, lvl->lv)) {
+			r = 0;
+			stack;
+		}
 	}
 
 	sigint_restore();
@@ -1418,23 +1547,19 @@ int pvcreate_params_validate(struct cmd_context *cmd,
 		return 0;
 	}
 
-	if (arg_count(cmd, pvmetadatacopies_ARG) &&
-	    arg_int_value(cmd, pvmetadatacopies_ARG, -1) > 2) {
-		log_error("Metadatacopies may only be 0, 1 or 2");
+	if (!(cmd->fmt->features & FMT_BAS) &&
+	    arg_count(cmd, bootloaderareasize_ARG)) {
+		log_error("Bootloader area parameters only "
+			  "apply to text format.");
 		return 0;
 	}
 
-	if (arg_count(cmd, metadataignore_ARG)) {
-		pp->metadataignore = !strcmp(arg_str_value(cmd,
-						metadataignore_ARG,
-						DEFAULT_PVMETADATAIGNORE_STR),
-					 "y");
-	} else {
-		pp->metadataignore = !strcmp(find_config_tree_str(cmd,
-					"metadata/pvmetadataignore",
-					DEFAULT_PVMETADATAIGNORE_STR),
-					"y");
-	}
+	if (arg_count(cmd, metadataignore_ARG))
+		pp->metadataignore = arg_int_value(cmd, metadataignore_ARG,
+						   DEFAULT_PVMETADATAIGNORE);
+	else
+		pp->metadataignore = find_config_tree_bool(cmd, metadata_pvmetadataignore_CFG, NULL);
+
 	if (arg_count(cmd, pvmetadatacopies_ARG) &&
 	    !arg_int_value(cmd, pvmetadatacopies_ARG, -1) &&
 	    pp->metadataignore) {
@@ -1456,14 +1581,6 @@ int pvcreate_params_validate(struct cmd_context *cmd,
 		return 0;
 	}
 
-	if (pp->data_alignment && pp->pe_start) {
-		if (pp->pe_start % pp->data_alignment)
-			log_warn("WARNING: Ignoring data alignment %" PRIu64
-				 " incompatible with --restorefile value (%"
-				 PRIu64").", pp->data_alignment, pp->pe_start);
-		pp->data_alignment = 0;
-	}
-
 	if (arg_sign_value(cmd, dataalignmentoffset_ARG, SIGN_NONE) == SIGN_MINUS) {
 		log_error("Physical volume data alignment offset may not be negative");
 		return 0;
@@ -1475,11 +1592,16 @@ int pvcreate_params_validate(struct cmd_context *cmd,
 		return 0;
 	}
 
-	if (pp->data_alignment_offset && pp->pe_start) {
-		log_warn("WARNING: Ignoring data alignment offset %" PRIu64
-			 " incompatible with --restorefile value (%"
-			 PRIu64").", pp->data_alignment_offset, pp->pe_start);
-		pp->data_alignment_offset = 0;
+	if ((pp->data_alignment + pp->data_alignment_offset) &&
+	    (pp->rp.pe_start != PV_PE_START_CALC)) {
+		if ((pp->data_alignment ? pp->rp.pe_start % pp->data_alignment : pp->rp.pe_start) != pp->data_alignment_offset) {
+			log_warn("WARNING: Ignoring data alignment %s"
+				 " incompatible with restored pe_start value %s)",
+				 display_size(cmd, pp->data_alignment + pp->data_alignment_offset),
+				 display_size(cmd, pp->rp.pe_start));
+			pp->data_alignment = 0;
+			pp->data_alignment_offset = 0;
+		}
 	}
 
 	if (arg_sign_value(cmd, metadatasize_ARG, SIGN_NONE) == SIGN_MINUS) {
@@ -1487,17 +1609,20 @@ int pvcreate_params_validate(struct cmd_context *cmd,
 		return 0;
 	}
 
+	if (arg_sign_value(cmd, bootloaderareasize_ARG, SIGN_NONE) == SIGN_MINUS) {
+		log_error("Bootloader area size may not be negative");
+		return 0;
+	}
+
 	pp->pvmetadatasize = arg_uint64_value(cmd, metadatasize_ARG, UINT64_C(0));
 	if (!pp->pvmetadatasize)
-		pp->pvmetadatasize = find_config_tree_int(cmd,
-						 "metadata/pvmetadatasize",
-						 DEFAULT_PVMETADATASIZE);
+		pp->pvmetadatasize = find_config_tree_int(cmd, metadata_pvmetadatasize_CFG, NULL);
 
 	pp->pvmetadatacopies = arg_int_value(cmd, pvmetadatacopies_ARG, -1);
 	if (pp->pvmetadatacopies < 0)
-		pp->pvmetadatacopies = find_config_tree_int(cmd,
-						   "metadata/pvmetadatacopies",
-						   DEFAULT_PVMETADATACOPIES);
+		pp->pvmetadatacopies = find_config_tree_int(cmd, metadata_pvmetadatacopies_CFG, NULL);
+
+	pp->rp.ba_size = arg_uint64_value(cmd, bootloaderareasize_ARG, pp->rp.ba_size);
 
 	return 1;
 }
@@ -1519,9 +1644,73 @@ int get_activation_monitoring_mode(struct cmd_context *cmd,
 						 DEFAULT_DMEVENTD_MONITOR);
 	else if (is_static() || arg_count(cmd, ignoremonitoring_ARG) ||
 		 arg_count(cmd, sysinit_ARG) ||
-		 !find_config_tree_bool(cmd, "activation/monitoring",
-					DEFAULT_DMEVENTD_MONITOR))
+		 !find_config_tree_bool(cmd, activation_monitoring_CFG, NULL))
 		*monitoring_mode = DMEVENTD_MONITOR_IGNORE;
+
+	return 1;
+}
+
+/*
+ * Read pool options from cmdline
+ */
+int get_pool_params(struct cmd_context *cmd,
+		    const struct segment_type *segtype,
+		    int *passed_args,
+		    uint64_t *pool_metadata_size,
+		    int *pool_metadata_spare,
+		    uint32_t *chunk_size,
+		    thin_discards_t *discards,
+		    int *zero)
+{
+	*passed_args = 0;
+
+	if (segtype_is_thin_pool(segtype) || segtype_is_thin(segtype)) {
+		if (arg_count(cmd, zero_ARG)) {
+			*passed_args |= PASS_ARG_ZERO;
+			*zero = strcmp(arg_str_value(cmd, zero_ARG, "y"), "n");
+			log_very_verbose("Setting pool zeroing: %u", *zero);
+		}
+
+		if (arg_count(cmd, discards_ARG)) {
+			*passed_args |= PASS_ARG_DISCARDS;
+			*discards = (thin_discards_t) arg_uint_value(cmd, discards_ARG, 0);
+			log_very_verbose("Setting pool discards: %s",
+					 get_pool_discards_name(*discards));
+		}
+	}
+
+	if (arg_count(cmd, chunksize_ARG)) {
+		if (arg_sign_value(cmd, chunksize_ARG, SIGN_NONE) == SIGN_MINUS) {
+			log_error("Negative chunk size is invalid.");
+			return 0;
+		}
+
+		*passed_args |= PASS_ARG_CHUNK_SIZE;
+		*chunk_size = arg_uint_value(cmd, chunksize_ARG, 0);
+		log_very_verbose("Setting pool chunk size: %s",
+				 display_size(cmd, *chunk_size));
+	}
+
+	if (arg_count(cmd, poolmetadatasize_ARG)) {
+		if (arg_sign_value(cmd, poolmetadatasize_ARG, SIGN_NONE) == SIGN_MINUS) {
+			log_error("Negative pool metadata size is invalid.");
+			return 0;
+		}
+
+		if (arg_count(cmd, poolmetadata_ARG)) {
+			log_error("Please specify either metadata logical volume or its size.");
+			return 0;
+		}
+
+		*passed_args |= PASS_ARG_POOL_METADATA_SIZE;
+		*pool_metadata_size = arg_uint64_value(cmd, poolmetadatasize_ARG,
+						       UINT64_C(0));
+	} else if (arg_count(cmd, poolmetadata_ARG))
+		*passed_args |= PASS_ARG_POOL_METADATA_SIZE; /* fixed size */
+
+	/* TODO: default in lvm.conf ? */
+	*pool_metadata_spare = arg_int_value(cmd, poolmetadataspare_ARG,
+					     DEFAULT_POOL_METADATA_SPARE);
 
 	return 1;
 }
@@ -1533,13 +1722,13 @@ static int _validate_stripe_params(struct cmd_context *cmd, uint32_t *stripes,
 				   uint32_t *stripe_size)
 {
 	if (*stripes == 1 && *stripe_size) {
-		log_print("Ignoring stripesize argument with single stripe");
+		log_print_unless_silent("Ignoring stripesize argument with single stripe");
 		*stripe_size = 0;
 	}
 
 	if (*stripes > 1 && !*stripe_size) {
-		*stripe_size = find_config_tree_int(cmd, "metadata/stripesize", DEFAULT_STRIPESIZE) * 2;
-		log_print("Using default stripesize %s",
+		*stripe_size = find_config_tree_int(cmd, metadata_stripesize_CFG, NULL) * 2;
+		log_print_unless_silent("Using default stripesize %s",
 			  display_size(cmd, (uint64_t) *stripe_size));
 	}
 
@@ -1577,7 +1766,7 @@ int get_stripe_params(struct cmd_context *cmd, uint32_t *stripes, uint32_t *stri
 			return 0;
 		}
 
-		if(arg_uint64_value(cmd, stripesize_ARG, 0) > STRIPE_SIZE_LIMIT * 2) {
+		if (arg_uint64_value(cmd, stripesize_ARG, 0) > STRIPE_SIZE_LIMIT * 2) {
 			log_error("Stripe size cannot be larger than %s",
 				  display_size(cmd, (uint64_t) STRIPE_SIZE_LIMIT));
 			return 0;
@@ -1629,9 +1818,65 @@ int change_tag(struct cmd_context *cmd, struct volume_group *vg,
 	return 1;
 }
 
-/* Return percents of extents and avoid overflow, with optional roundup */
-uint32_t percent_of_extents(uint32_t percents, uint32_t count, int roundup)
+int process_each_label(struct cmd_context *cmd, int argc, char **argv, void *handle,
+		       process_single_label_fn_t process_single_label)
 {
-	return (uint32_t)(((uint64_t)percents * (uint64_t)count +
-			   ((roundup) ? 99 : 0)) / 100);
+	struct label *label;
+	struct dev_iter *iter;
+	struct device *dev;
+
+	int ret_max = ECMD_PROCESSED;
+	int ret;
+	int opt = 0;
+
+	if (argc) {
+		for (; opt < argc; opt++) {
+			if (!(dev = dev_cache_get(argv[opt], cmd->filter))) {
+				log_error("Failed to find device "
+					  "\"%s\"", argv[opt]);
+				ret_max = ECMD_FAILED;
+				continue;
+			}
+
+			if (!label_read(dev, &label, 0)) {
+				log_error("No physical volume label read from %s",
+					  argv[opt]);
+				ret_max = ECMD_FAILED;
+				continue;
+			}
+
+			ret = process_single_label(cmd, label, handle);
+
+			if (ret > ret_max)
+				ret_max = ret;
+
+			if (sigint_caught())
+				break;
+		}
+
+		return ret_max;
+	}
+
+	if (!(iter = dev_iter_create(cmd->filter, 1))) {
+		log_error("dev_iter creation failed");
+		return ECMD_FAILED;
+	}
+
+	while ((dev = dev_iter_get(iter)))
+	{
+		if (!label_read(dev, &label, 0))
+			continue;
+
+		ret = process_single_label(cmd, label, handle);
+
+		if (ret > ret_max)
+			ret_max = ret;
+
+		if (sigint_caught())
+			break;
+	}
+
+	dev_iter_destroy(iter);
+
+	return ret_max;
 }

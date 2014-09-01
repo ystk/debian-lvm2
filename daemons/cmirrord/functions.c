@@ -235,10 +235,8 @@ static int rw_log(struct log_c *lc, int do_write)
  */
 static int read_log(struct log_c *lc)
 {
-	struct log_header lh;
+	struct log_header lh = { 0 };
 	size_t bitset_size;
-
-	memset(&lh, 0, sizeof(struct log_header));
 
 	if (rw_log(lc, 0))
 		return -EIO; /* Failed disk read */
@@ -337,14 +335,18 @@ static int find_disk_path(char *major_minor_str, char *path_rtn, int *unlink_pat
 		    (major(statbuf.st_rdev) == major) &&
 		    (minor(statbuf.st_rdev) == minor)) {
 			LOG_DBG("  %s: YES", dep->d_name);
-			closedir(dp);
+			if (closedir(dp))
+				LOG_DBG("Unable to closedir /dev/mapper %s",
+					strerror(errno));
 			return 0;
 		} else {
 			LOG_DBG("  %s: NO", dep->d_name);
 		}
 	}
 
-	closedir(dp);
+	if (closedir(dp))
+		LOG_DBG("Unable to closedir /dev/mapper %s",
+			strerror(errno));
 
 	/* FIXME Find out why this was here and deal with underlying problem. */
 	LOG_DBG("Path not found for %d/%d", major, minor);
@@ -640,8 +642,9 @@ static int clog_dtr(struct dm_ulog_request *rq)
 	LOG_DBG("[%s] Cluster log removed", SHORT_UUID(lc->uuid));
 
 	dm_list_del(&lc->list);
-	if (lc->disk_fd != -1)
-		close(lc->disk_fd);
+	if (lc->disk_fd != -1 && close(lc->disk_fd))
+		LOG_ERROR("Failed to close disk log: %s",
+			  strerror(errno));
 	if (lc->disk_buffer)
 		free(lc->disk_buffer);
 	dm_free(lc->clean_bits);
@@ -784,7 +787,7 @@ static int clog_resume(struct dm_ulog_request *rq)
 		else if (lc->disk_nr_regions > lc->region_count)
 			LOG_DBG("[%s] Mirror has shrunk, updating log bits",
 				SHORT_UUID(lc->uuid));
-		break;		
+		break;
 	case -EINVAL:
 		LOG_DBG("[%s] (Re)initializing mirror log - resync issued.",
 			SHORT_UUID(lc->uuid));
@@ -837,7 +840,7 @@ out:
 	lc->sync_search = 0;
 	lc->state = LOG_RESUMED;
 	lc->recovery_halted = 0;
-	
+
 	return rq->error;
 }
 
@@ -1032,7 +1035,7 @@ static int clog_flush(struct dm_ulog_request *rq, int server)
 {
 	int r = 0;
 	struct log_c *lc = get_log(rq->uuid, rq->luid);
-	
+
 	if (!lc)
 		return -EINVAL;
 
@@ -1614,7 +1617,7 @@ out:
 
 	rq->data_size = sizeof(*pkg);
 
-	return 0;	
+	return 0;
 }
 
 
@@ -1719,13 +1722,11 @@ int do_request(struct clog_request *rq, int server)
 static void print_bits(dm_bitset_t bs, int print)
 {
 	int i, size;
-	char outbuf[128];
+	char outbuf[128] = { 0 };
 	unsigned char *buf = (unsigned char *)(bs + 1);
 
 	size = (*bs % 8) ? 1 : 0;
 	size += (*bs / 8);
-
-	memset(outbuf, 0, sizeof(outbuf));
 
 	for (i = 0; i < size; i++) {
 		if (!(i % 16)) {
@@ -1870,7 +1871,7 @@ int pull_state(const char *uuid, uint64_t luid,
 
 		LOG_DBG("[%s] loading clean_bits:", SHORT_UUID(lc->uuid));
 
-		print_bits(lc->sync_bits, 0);
+		print_bits(lc->clean_bits, 0);
 	}
 
 	return 0;

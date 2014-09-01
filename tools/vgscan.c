@@ -19,39 +19,46 @@ static int vgscan_single(struct cmd_context *cmd, const char *vg_name,
 			 struct volume_group *vg,
 			 void *handle __attribute__((unused)))
 {
-	log_print("Found %svolume group \"%s\" using metadata type %s",
-		  vg_is_exported(vg) ? "exported " : "", vg_name,
-		  vg->fid->fmt->name);
+	log_print_unless_silent("Found %svolume group \"%s\" using metadata type %s",
+				vg_is_exported(vg) ? "exported " : "", vg_name,
+				vg->fid->fmt->name);
 
 	check_current_backup(vg);
-
-	/* keep lvmetad up to date */
-	if (!lvmetad_vg_update(vg))
-		stack;
 
 	return ECMD_PROCESSED;
 }
 
 int vgscan(struct cmd_context *cmd, int argc, char **argv)
 {
-	int maxret, ret, lvmetad;
+	int maxret, ret;
 
 	if (argc) {
 		log_error("Too many parameters on command line");
 		return EINVALID_CMD_LINE;
 	}
 
-	if (!lock_vol(cmd, VG_GLOBAL, LCK_VG_WRITE)) {
+	if (!lock_vol(cmd, VG_GLOBAL, LCK_VG_WRITE, NULL)) {
 		log_error("Unable to obtain global lock.");
 		return ECMD_FAILED;
 	}
 
-	persistent_filter_wipe(cmd->filter);
-	lvmcache_destroy(cmd, 1);
-	lvmetad = lvmetad_active();
-	lvmetad_set_active(0); /* do not rely on lvmetad info */
+	if (cmd->filter->wipe)
+		cmd->filter->wipe(cmd->filter);
+	lvmcache_destroy(cmd, 1, 0);
 
-	log_print("Reading all physical volumes.  This may take a while...");
+	if (arg_count(cmd, cache_ARG)) {
+		if (lvmetad_active()) {
+			if (!lvmetad_pvscan_all_devs(cmd, NULL))
+				return ECMD_FAILED;
+		}
+		else {
+			log_error("Cannot proceed since lvmetad is not active.");
+			unlock_vg(cmd, VG_GLOBAL);
+			return ECMD_FAILED;
+		}
+	}
+
+	log_print_unless_silent("Reading all physical volumes.  This may take a while...");
 
 	maxret = process_each_vg(cmd, argc, argv, 0, NULL,
 				 &vgscan_single);
@@ -62,7 +69,6 @@ int vgscan(struct cmd_context *cmd, int argc, char **argv)
 			maxret = ret;
 	}
 
-	lvmetad_set_active(lvmetad); /* restore */
 	unlock_vg(cmd, VG_GLOBAL);
 	return maxret;
 }

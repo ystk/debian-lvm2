@@ -197,14 +197,11 @@ static int add_internal_client(int fd, fd_callback_t callback)
 
 	DEBUGLOG("Add_internal_client, fd = %d\n", fd);
 
-	client = malloc(sizeof(struct local_client));
-	if (!client)
-	{
+	if (!(client = dm_zalloc(sizeof(*client)))) {
 		DEBUGLOG("malloc failed\n");
 		return -1;
 	}
 
-	memset(client, 0, sizeof(struct local_client));
 	client->fd = fd;
 	client->type = CLUSTER_INTERNAL;
 	client->callback = callback;
@@ -368,9 +365,6 @@ static int _init_cluster(void)
 
 static void _cluster_closedown(void)
 {
-	DEBUGLOG("cluster_closedown\n");
-	destroy_lvhash();
-
 	saLckFinalize(lck_handle);
 	cpg_finalize(cpg_handle);
 }
@@ -506,7 +500,7 @@ static int _lock_resource(char *resource, int mode, int flags, int *lockid)
 		saLckResourceClose(res_handle);
 		return ais_to_errno(err);
 	}
-			
+
 	/* Wait for it to complete */
 
 	DEBUGLOG("lock_resource returning %d, lock_id=%" PRIx64 "\n",
@@ -690,6 +684,6 @@ struct cluster_ops *init_openais_cluster(void)
 {
 	if (!_init_cluster())
 		return &_cluster_openais_ops;
-	else
-		return NULL;
+
+	return NULL;
 }

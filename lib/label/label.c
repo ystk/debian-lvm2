@@ -19,7 +19,6 @@
 #include "xlate.h"
 #include "lvmcache.h"
 #include "lvmetad.h"
-#include "metadata.h"
 
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -76,11 +75,11 @@ void label_exit(void)
 	dm_list_init(&_labellers);
 }
 
-int label_register_handler(const char *name, struct labeller *handler)
+int label_register_handler(struct labeller *handler)
 {
 	struct labeller_i *li;
 
-	if (!(li = _alloc_li(name, handler)))
+	if (!(li = _alloc_li(handler->fmt->name, handler)))
 		return_0;
 
 	dm_list_add(&_labellers, &li->list);
@@ -112,7 +111,7 @@ static struct labeller *_find_labeller(struct device *dev, char *buf,
 
 	if (!dev_read(dev, scan_sector << SECTOR_SHIFT,
 		      LABEL_SCAN_SIZE, readbuf)) {
-		log_debug("%s: Failed to read label area", dev_name(dev));
+		log_debug_devs("%s: Failed to read label area", dev_name(dev));
 		goto out;
 	}
 
@@ -208,7 +207,7 @@ int label_remove(struct device *dev)
 	dev_flush(dev);
 
 	if (!dev_read(dev, UINT64_C(0), LABEL_SCAN_SIZE, readbuf)) {
-		log_debug("%s: Failed to read label area", dev_name(dev));
+		log_debug_devs("%s: Failed to read label area", dev_name(dev));
 		goto out;
 	}
 
@@ -263,7 +262,7 @@ int label_read(struct device *dev, struct label **result,
 	int r = 0;
 
 	if ((info = lvmcache_info_from_pvid(dev->pvid, 1))) {
-		log_debug("Using cached label for %s", dev_name(dev));
+		log_debug_devs("Using cached label for %s", dev_name(dev));
 		*result = lvmcache_get_label(info);
 		return 1;
 	}
@@ -280,10 +279,12 @@ int label_read(struct device *dev, struct label **result,
 	}
 
 	if (!(l = _find_labeller(dev, buf, &sector, scan_sector)))
-		goto out;
+		goto_out;
 
-	if ((r = (l->ops->read)(l, dev, buf, result)) && result && *result)
+	if ((r = (l->ops->read)(l, dev, buf, result)) && result && *result) {
+		(*result)->dev = dev;
 		(*result)->sector = sector;
+	}
 
       out:
 	if (!dev_close(dev))
@@ -329,7 +330,7 @@ int label_write(struct device *dev, struct label *label)
 		 PRIu32 ".", dev_name(dev), label->sector,
 		 xlate32(lh->offset_xl));
 	if (!dev_write(dev, label->sector << SECTOR_SHIFT, LABEL_SIZE, buf)) {
-		log_debug("Failed to write label to %s", dev_name(dev));
+		log_debug_devs("Failed to write label to %s", dev_name(dev));
 		r = 0;
 	}
 

@@ -11,7 +11,10 @@
 
 # 'Exercise some lvcreate diagnostics'
 
-. lib/test
+. lib/inittest
+
+# FIXME  update test to make something useful on <16T
+aux can_use_16T || skip
 
 aux prepare_vg 4
 
@@ -20,10 +23,10 @@ lvcreate -s -l 100%FREE -n $lv $vg --virtualsize 1024T
 #FIXME this should be 1024T
 #check lv_field $vg/$lv size "128.00m"
 
-aux lvmconf 'devices/filter = [ "a/dev\/mapper\/.*$/", "a/dev\/LVMTEST/", "r/.*/" ]'
+aux extend_filter_LVMTEST
 
-pvcreate $DM_DEV_DIR/$vg/$lv
-vgcreate -c n $vg1 $DM_DEV_DIR/$vg/$lv
+pvcreate "$DM_DEV_DIR/$vg/$lv"
+vgcreate $vg1 "$DM_DEV_DIR/$vg/$lv"
 
 lvcreate -l 100%FREE -n $lv1 $vg1
 check lv_field $vg1/$lv1 size "1024.00t"
@@ -38,3 +41,5 @@ check lv_field $vg1/$lv1 size "737.28t"
 lvremove -ff $vg1/$lv1
 
 lvremove -ff $vg/$lv
+
+vgremove -ff $vg

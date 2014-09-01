@@ -11,56 +11,106 @@
 
 # 'Test pvchange option values'
 
-. lib/test
+. lib/inittest
 
-aux prepare_devs 4
+check_changed_uuid_() {
+	test "$1" != "$(get pv_field "$2" uuid)" || die "UUID has not changed!"
+}
 
-for mda in 0 1 2 
+aux prepare_pvs 4
+
+# check 'allocatable' pv attribute
+pvcreate $dev1
+check pv_field "$dev1" pv_attr ---
+vgcreate $vg1 "$dev1"
+check pv_field "$dev1" pv_attr a--
+pvchange --allocatable n "$dev1"
+check pv_field "$dev1" pv_attr ---
+vgremove -ff $vg1
+not pvchange --allocatable y "$dev1"
+pvremove -ff "$dev1"
+
+for mda in 0 1 2
 do
-# "setup pv with metadatacopies = $mda" 
-	pvcreate $dev4 
-	pvcreate --metadatacopies $mda $dev1 
-	vgcreate $vg1 $dev1 $dev4 
+# "setup pv with metadatacopies = $mda"
+	pvcreate --metadatacopies $mda "$dev1"
+# cannot change allocatability for orphan PVs
+	fail pvchange "$dev1" -x y
+	fail pvchange "$dev1" -x n
+	vgcreate $vg1 "$dev4" "$dev1"
 
-# "pvchange adds/dels tag to pvs with metadatacopies = $mda " 
-	pvchange $dev1 --addtag test$mda 
-	check pv_field $dev1 pv_tags test$mda 
-	pvchange $dev1 --deltag test$mda 
-	check pv_field $dev1 pv_tags ""
+# "pvchange adds/dels tag to pvs with metadatacopies = $mda "
+	pvchange "$dev1" --addtag test$mda
+	check pv_field "$dev1" pv_tags test$mda
+	pvchange "$dev1" --deltag test$mda
+	check pv_field "$dev1" pv_tags ""
 
 # "vgchange disable/enable allocation for pvs with metadatacopies = $mda (bz452982)"
-	pvchange $dev1 -x n 
-	check pv_field $dev1 pv_attr  ---
-	pvchange $dev1 -x y 
-	check pv_field $dev1 pv_attr  a--
+	pvchange "$dev1" -x n
+	pvchange "$dev1" -x n   # already disabled
+	check pv_field "$dev1" pv_attr  ---
+	pvchange "$dev1" -x y
+	pvchange "$dev1" -x y   # already enabled
+	check pv_field "$dev1" pv_attr  a--
 
+# check we are able to change number of managed metadata areas
+	if test $mda -gt 0 ; then
+		pvchange --force --metadataignore y "$dev1"
+	else
+		# already ignored
+		fail pvchange --metadataignore y "$dev1"
+	fi
 # 'remove pv'
-	vgremove $vg1 
-	pvremove $dev1 $dev4
+	vgremove $vg1
+	pvremove "$dev1"
 done
 
 # "pvchange uuid"
-pvcreate --metadatacopies 0 $dev1 
-pvcreate --metadatacopies 2 $dev2 
-vgcreate $vg1 $dev1 $dev2 
-pvchange -u $dev1 
-pvchange -u $dev2 
-check pvlv_counts $vg1 2 0 0
+pvcreate --metadatacopies 0 "$dev1"
+pvcreate --metadatacopies 2 "$dev2"
+vgcreate $vg1 "$dev1" "$dev2"
+
+# Checking for different UUID after pvchange
+UUID1=$(get pv_field "$dev1" uuid)
+pvchange -u "$dev1"
+check_changed_uuid_ "$UUID1" "$dev1"
+
+UUID2=$(get pv_field "$dev2" uuid)
+pvchange -u "$dev2"
+check_changed_uuid_ "$UUID2" "$dev2"
+
+UUID1=$(get pv_field "$dev1" uuid)
+UUID2=$(get pv_field "$dev2" uuid)
 pvchange -u --all
+check_changed_uuid_ "$UUID1" "$dev1"
+check_changed_uuid_ "$UUID2" "$dev2"
 check pvlv_counts $vg1 2 0 0
 
-# "pvchange rejects uuid change under an active lv" 
-lvcreate -l 16 -i 2 -n $lv --alloc anywhere $vg1 
-check pvlv_counts $vg1 2 1 0 
-not pvchange -u $dev1
-lvchange -an "$vg1"/"$lv" 
-pvchange -u $dev1
+# some args are needed
+invalid pvchange
+# some PV needed
+invalid pvchange --addtag tag
+invalid pvchange --deltag tag
+# some --all & PV can go together
+invalid pvchange -a "$dev1" --addtag tag
+# '-a' needs more params
+invalid pvchange -a
+# '-a' is searching for devs, so specifying device is invalid
+invalid pvchange -a "$dev1"
+fail pvchange -u "$dev1-notfound"
 
-# "cleanup" 
-lvremove -f "$vg1"/"$lv"
-vgremove $vg1
+# pvchange rejects uuid change under an active lv
+lvcreate -l 16 -i 2 -n $lv --alloc anywhere $vg1
+check pvlv_counts $vg1 2 1 0
+not pvchange -u "$dev1"
 
-# "pvchange reject --addtag to lvm1 pv"
-pvcreate -M1 $dev1 
-not pvchange $dev1 --addtag test
+vgremove -f $vg1
 
+# cannot change PV tag to PV that is not in VG"
+fail pvchange "$dev1" --addtag test
+fail pvchange "$dev1" --deltag test
+
+# cannot add PV tag to lvm1 format
+pvcreate -M1 "$dev1"
+vgcreate -M1 $vg1 "$dev1"
+fail pvchange "$dev1" --addtag test

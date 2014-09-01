@@ -15,16 +15,26 @@
 #define _XOPEN_SOURCE 500  /* pthread */
 
 #include "configure.h"
-#include "daemon-shared.h"
+#include "daemon-io.h"
+#include "config-util.h"
 #include "daemon-server.h"
+#include "daemon-log.h"
+#include "lvm-version.h"
 
 #include <assert.h>
 #include <pthread.h>
-#include <malloc.h>
 #include <stdint.h>
 #include <unistd.h>
 
+#include <math.h>  /* fabs() */
+#include <float.h> /* DBL_EPSILON */
+
+#define LVMETAD_SOCKET DEFAULT_RUN_DIR "/lvmetad.socket"
+
 typedef struct {
+	log_state *log; /* convenience */
+	const char *log_config;
+
 	struct dm_hash_table *pvid_to_pvmeta;
 	struct dm_hash_table *device_to_pvid; /* shares locks with above */
 
@@ -34,30 +44,45 @@ typedef struct {
 	struct dm_hash_table *pvid_to_vgid;
 	struct {
 		struct dm_hash_table *vg;
+		pthread_mutex_t vg_lock_map;
 		pthread_mutex_t pvid_to_pvmeta;
 		pthread_mutex_t vgid_to_metadata;
 		pthread_mutex_t pvid_to_vgid;
 	} lock;
+	char token[128];
+	pthread_mutex_t token_lock;
 } lvmetad_state;
 
-__attribute__ ((format(printf, 1, 2)))
-static void debug(const char *fmt, ...) {
-	va_list ap;
-	va_start(ap, fmt);
-	fprintf(stderr, "[D %lu] ", pthread_self());
-	vfprintf(stderr, fmt, ap);
-	va_end(ap);
-	fflush(stderr);
+static void destroy_metadata_hashes(lvmetad_state *s)
+{
+	struct dm_hash_node *n = NULL;
+
+	dm_hash_iterate(n, s->vgid_to_metadata)
+		dm_config_destroy(dm_hash_get_data(s->vgid_to_metadata, n));
+
+	dm_hash_iterate(n, s->pvid_to_pvmeta)
+		dm_config_destroy(dm_hash_get_data(s->pvid_to_pvmeta, n));
+
+	dm_hash_destroy(s->pvid_to_pvmeta);
+	dm_hash_destroy(s->vgid_to_metadata);
+	dm_hash_destroy(s->vgid_to_vgname);
+	dm_hash_destroy(s->vgname_to_vgid);
+
+	dm_hash_iterate(n, s->device_to_pvid)
+		dm_free(dm_hash_get_data(s->device_to_pvid, n));
+
+	dm_hash_destroy(s->device_to_pvid);
+	dm_hash_destroy(s->pvid_to_vgid);
 }
 
-static int debug_cft_line(const char *line, void *baton) {
-	fprintf(stderr, "| %s\n", line);
-	return 0;
-}
-
-static void debug_cft(const char *id, struct dm_config_node *n) {
-	debug("%s\n", id);
-	dm_config_write_node(n, &debug_cft_line, NULL);
+static void create_metadata_hashes(lvmetad_state *s)
+{
+	s->pvid_to_pvmeta = dm_hash_create(32);
+	s->device_to_pvid = dm_hash_create(32);
+	s->vgid_to_metadata = dm_hash_create(32);
+	s->vgid_to_vgname = dm_hash_create(32);
+	s->pvid_to_vgid = dm_hash_create(32);
+	s->vgname_to_vgid = dm_hash_create(32);
 }
 
 static void lock_pvid_to_pvmeta(lvmetad_state *s) {
@@ -75,6 +100,16 @@ static void lock_pvid_to_vgid(lvmetad_state *s) {
 static void unlock_pvid_to_vgid(lvmetad_state *s) {
 	pthread_mutex_unlock(&s->lock.pvid_to_vgid); }
 
+static response reply_fail(const char *reason)
+{
+	return daemon_reply_simple("failed", "reason = %s", reason, NULL);
+}
+
+static response reply_unknown(const char *reason)
+{
+	return daemon_reply_simple("unknown", "reason = %s", reason, NULL);
+}
+
 /*
  * TODO: It may be beneficial to clean up the vg lock hash from time to time,
  * since if we have many "rogue" requests for nonexistent things, we will keep
@@ -83,37 +118,47 @@ static void unlock_pvid_to_vgid(lvmetad_state *s) {
 static struct dm_config_tree *lock_vg(lvmetad_state *s, const char *id) {
 	pthread_mutex_t *vg;
 	struct dm_config_tree *cft;
+	pthread_mutexattr_t rec;
 
-	lock_vgid_to_metadata(s);
-	vg = dm_hash_lookup(s->lock.vg, id);
-	if (!vg) {
-		pthread_mutexattr_t rec;
-		pthread_mutexattr_init(&rec);
-		pthread_mutexattr_settype(&rec, PTHREAD_MUTEX_RECURSIVE_NP);
-		if (!(vg = malloc(sizeof(pthread_mutex_t))))
-                        return NULL;
-		pthread_mutex_init(vg, &rec);
+	pthread_mutex_lock(&s->lock.vg_lock_map);
+	if (!(vg = dm_hash_lookup(s->lock.vg, id))) {
+		if (!(vg = malloc(sizeof(pthread_mutex_t))) ||
+		    pthread_mutexattr_init(&rec) ||
+		    pthread_mutexattr_settype(&rec, PTHREAD_MUTEX_RECURSIVE_NP) ||
+		    pthread_mutex_init(vg, &rec))
+			goto bad;
 		if (!dm_hash_insert(s->lock.vg, id, vg)) {
-			free(vg);
-			return NULL;
+			pthread_mutex_destroy(vg);
+			goto bad;
 		}
 	}
-	// debug("lock VG %s\n", id);
+	/* We never remove items from s->lock.vg => the pointer remains valid. */
+	pthread_mutex_unlock(&s->lock.vg_lock_map);
+
+	DEBUGLOG(s, "locking VG %s", id);
 	pthread_mutex_lock(vg);
+
+	/* Protect against structure changes of the vgid_to_metadata hash. */
+	lock_vgid_to_metadata(s);
 	cft = dm_hash_lookup(s->vgid_to_metadata, id);
 	unlock_vgid_to_metadata(s);
 	return cft;
+bad:
+	pthread_mutex_unlock(&s->lock.vg_lock_map);
+	free(vg);
+	ERROR(s, "Out of memory");
+	return NULL;
 }
 
 static void unlock_vg(lvmetad_state *s, const char *id) {
 	pthread_mutex_t *vg;
 
-	// debug("unlock VG %s\n", id);
-	lock_vgid_to_metadata(s); /* someone might be changing the s->lock.vg structure right
-				   * now, so avoid stepping on each other's toes */
+	DEBUGLOG(s, "unlocking VG %s", id);
+	/* Protect the s->lock.vg structure from concurrent access. */
+	pthread_mutex_lock(&s->lock.vg_lock_map);
 	if ((vg = dm_hash_lookup(s->lock.vg, id)))
 		pthread_mutex_unlock(vg);
-	unlock_vgid_to_metadata(s);
+	pthread_mutex_unlock(&s->lock.vg_lock_map);
 }
 
 static struct dm_config_node *pvs(struct dm_config_node *vg)
@@ -123,129 +168,6 @@ static struct dm_config_node *pvs(struct dm_config_node *vg)
 		pv = pv->child;
 	return pv;
 }
-
-/*
- * TODO: This set_flag function is pretty generic and might make sense in a
- * library here or there.
- */
-static int set_flag(struct dm_config_tree *cft, struct dm_config_node *parent,
-		     const char *field, const char *flag, int want) {
-	struct dm_config_value *value = NULL, *pred = NULL;
-	struct dm_config_node *node = dm_config_find_node(parent->child, field);
-	struct dm_config_value *new;
-
-	if (node)
-		value = node->v;
-
-	while (value && value->type != DM_CFG_EMPTY_ARRAY && strcmp(value->v.str, flag)) {
-		pred = value;
-		value = value->next;
-	}
-
-	if (value && want)
-		return 1;
-
-	if (!value && !want)
-		return 1;
-
-	if (value && !want) {
-		if (pred) {
-			pred->next = value->next;
-		} else if (value == node->v && value->next) {
-			node->v = value->next;
-		} else {
-			node->v->type = DM_CFG_EMPTY_ARRAY;
-		}
-	}
-
-	if (!value && want) {
-		if (!node) {
-			if (!(node = dm_config_create_node(cft, field)))
-				return 0;
-			node->sib = parent->child;
-			if (!(node->v = dm_config_create_value(cft)))
-				return 0;
-			node->v->type = DM_CFG_EMPTY_ARRAY;
-			node->parent = parent;
-			parent->child = node;
-		}
-		if (!(new = dm_config_create_value(cft))) {
-			/* FIXME error reporting */
-			return 0;
-		}
-		new->type = DM_CFG_STRING;
-		new->v.str = flag;
-		new->next = node->v;
-		node->v = new;
-	}
-
-	return 1;
-}
-
-static struct dm_config_node *make_config_node(struct dm_config_tree *cft,
-					       const char *key,
-					       struct dm_config_node *parent,
-					       struct dm_config_node *pre_sib)
-{
-	struct dm_config_node *cn;
-
-	if (!(cn = dm_config_create_node(cft, key)))
-		return NULL;
-
-	cn->parent = parent;
-	cn->sib = NULL;
-	cn->v = NULL;
-	cn->child = NULL;
-
-	if (parent && parent->child && !pre_sib) { /* find the last one */
-		pre_sib = parent->child;
-		while (pre_sib && pre_sib->sib)
-			pre_sib = pre_sib->sib;
-	}
-
-	if (parent && !parent->child)
-		parent->child = cn;
-	if (pre_sib)
-		pre_sib->sib = cn;
-
-	return cn;
-}
-
-static struct dm_config_node *make_text_node(struct dm_config_tree *cft,
-					     const char *key,
-					     const char *value,
-					     struct dm_config_node *parent,
-					     struct dm_config_node *pre_sib)
-{
-	struct dm_config_node *cn;
-
-	if (!(cn = make_config_node(cft, key, parent, pre_sib)) ||
-	    !(cn->v = dm_config_create_value(cft)))
-		return NULL;
-
-	cn->v->type = DM_CFG_STRING;
-	cn->v->v.str = value;
-	return cn;
-}
-
-#if 0
-static struct dm_config_node *make_int_node(struct dm_config_tree *cft,
-					    const char *key,
-					    int64_t value,
-					    struct dm_config_node *parent,
-					    struct dm_config_node *pre_sib)
-{
-	struct dm_config_node *cn;
-
-	if (!(cn = make_config_node(cft, key, parent, pre_sib)) ||
-	    !(cn->v = dm_config_create_value(cft)))
-		return NULL;
-
-	cn->v->type = DM_CFG_INT;
-	cn->v->v.i = value;
-	return cn;
-}
-#endif
 
 static void filter_metadata(struct dm_config_node *vg) {
 	struct dm_config_node *pv = pvs(vg);
@@ -367,7 +289,9 @@ static response pv_list(lvmetad_state *s, request r)
 	struct dm_config_node *cn = NULL, *cn_pvs;
 	struct dm_hash_node *n;
 	const char *id;
-	response res = { .buffer = NULL };
+	response res = { 0 };
+
+	buffer_init( &res.buffer );
 
 	if (!(res.cft = dm_config_create()))
 		return res; /* FIXME error reporting */
@@ -378,8 +302,7 @@ static response pv_list(lvmetad_state *s, request r)
 
 	lock_pvid_to_pvmeta(s);
 
-	for (n = dm_hash_get_first(s->pvid_to_pvmeta); n;
-	     n = dm_hash_get_next(s->pvid_to_pvmeta, n)) {
+	dm_hash_iterate(n, s->pvid_to_pvmeta) {
 		id = dm_hash_get_key(s->pvid_to_pvmeta, n);
 		cn = make_pv_node(s, id, res.cft, cn_pvs, cn);
 	}
@@ -393,34 +316,36 @@ static response pv_lookup(lvmetad_state *s, request r)
 {
 	const char *pvid = daemon_request_str(r, "uuid", NULL);
 	int64_t devt = daemon_request_int(r, "device", 0);
-	response res = { .buffer = NULL };
+	response res = { 0 };
 	struct dm_config_node *pv;
 
+	buffer_init( &res.buffer );
+
 	if (!pvid && !devt)
-		return daemon_reply_simple("failed", "reason = %s", "need PVID or device", NULL);
+		return reply_fail("need PVID or device");
 
 	if (!(res.cft = dm_config_create()))
-		return daemon_reply_simple("failed", "reason = %s", "out of memory", NULL);
+		return reply_fail("out of memory");
 
 	if (!(res.cft->root = make_text_node(res.cft, "response", "OK", NULL, NULL)))
-		return daemon_reply_simple("failed", "reason = %s", "out of memory", NULL);
+		return reply_fail("out of memory");
 
 	lock_pvid_to_pvmeta(s);
 	if (!pvid && devt)
 		pvid = dm_hash_lookup_binary(s->device_to_pvid, &devt, sizeof(devt));
 
 	if (!pvid) {
-		debug("pv_lookup: could not find device %" PRIu64 "\n", devt);
 		unlock_pvid_to_pvmeta(s);
+		WARN(s, "pv_lookup: could not find device %" PRIu64, devt);
 		dm_config_destroy(res.cft);
-		return daemon_reply_simple("unknown", "reason = %s", "device not found", NULL);
+		return reply_unknown("device not found");
 	}
 
 	pv = make_pv_node(s, pvid, res.cft, NULL, res.cft->root);
 	if (!pv) {
 		unlock_pvid_to_pvmeta(s);
 		dm_config_destroy(res.cft);
-		return daemon_reply_simple("unknown", "reason = %s", "PV not found", NULL);
+		return reply_unknown("PV not found");
 	}
 
 	pv->key = "physical_volume";
@@ -435,7 +360,10 @@ static response vg_list(lvmetad_state *s, request r)
 	struct dm_hash_node *n;
 	const char *id;
 	const char *name;
-	response res = { .buffer = NULL };
+	response res = { 0 };
+
+	buffer_init( &res.buffer );
+
 	if (!(res.cft = dm_config_create()))
                 goto bad; /* FIXME: better error reporting */
 
@@ -460,8 +388,7 @@ static response vg_list(lvmetad_state *s, request r)
 
 	lock_vgid_to_metadata(s);
 
-	n = dm_hash_get_first(s->vgid_to_vgname);
-	while (n) {
+	dm_hash_iterate(n, s->vgid_to_vgname) {
 		id = dm_hash_get_key(s->vgid_to_vgname, n),
 		name = dm_hash_get_data(s->vgid_to_vgname, n);
 
@@ -489,8 +416,6 @@ static response vg_list(lvmetad_state *s, request r)
 		if (!cn_vgs->child)
 			cn_vgs->child = cn;
 		cn_last = cn;
-
-		n = dm_hash_get_next(s->vgid_to_vgname, n);
 	}
 
 	unlock_vgid_to_metadata(s);
@@ -502,12 +427,14 @@ static response vg_lookup(lvmetad_state *s, request r)
 {
 	struct dm_config_tree *cft;
 	struct dm_config_node *metadata, *n;
-	response res = { .buffer = NULL };
+	response res = { 0 };
 
 	const char *uuid = daemon_request_str(r, "uuid", NULL);
 	const char *name = daemon_request_str(r, "name", NULL);
 
-	debug("vg_lookup: uuid = %s, name = %s\n", uuid, name);
+	buffer_init( &res.buffer );
+
+	DEBUGLOG(s, "vg_lookup: uuid = %s, name = %s", uuid, name);
 
 	if (!uuid || !name) {
 		lock_vgid_to_metadata(s);
@@ -518,15 +445,16 @@ static response vg_lookup(lvmetad_state *s, request r)
 		unlock_vgid_to_metadata(s);
 	}
 
-	debug("vg_lookup: updated uuid = %s, name = %s\n", uuid, name);
+	DEBUGLOG(s, "vg_lookup: updated uuid = %s, name = %s", uuid, name);
 
-	if (!uuid)
-		return daemon_reply_simple("unknown", "reason = %s", "VG not found", NULL);
+	/* Check the name here. */
+	if (!uuid || !name)
+		return reply_unknown("VG not found");
 
 	cft = lock_vg(s, uuid);
 	if (!cft || !cft->root) {
 		unlock_vg(s, uuid);
-		return daemon_reply_simple("unknown", "reason = %s", "UUID not found", NULL);
+		return reply_unknown("UUID not found");
 	}
 
 	metadata = cft->root;
@@ -537,12 +465,19 @@ static response vg_lookup(lvmetad_state *s, request r)
 	if (!(res.cft->root = n = dm_config_create_node(res.cft, "response")))
 		goto bad;
 
+	if (!(n->v = dm_config_create_value(cft)))
+		goto bad;
+
 	n->parent = res.cft->root;
 	n->v->type = DM_CFG_STRING;
 	n->v->v.str = "OK";
 
 	if (!(n = n->sib = dm_config_create_node(res.cft, "name")))
 		goto bad;
+
+	if (!(n->v = dm_config_create_value(res.cft)))
+		goto bad;
+
 	n->parent = res.cft->root;
 	n->v->type = DM_CFG_STRING;
 	n->v->v.str = name;
@@ -551,7 +486,6 @@ static response vg_lookup(lvmetad_state *s, request r)
 	if (!(n = n->sib = dm_config_clone_node(res.cft, metadata, 1)))
 		goto bad;
 	n->parent = res.cft->root;
-	res.error = 0;
 	unlock_vg(s, uuid);
 
 	update_pv_status(s, res.cft, n, 1); /* FIXME report errors */
@@ -559,7 +493,13 @@ static response vg_lookup(lvmetad_state *s, request r)
 	return res;
 bad:
 	unlock_vg(s, uuid);
-	return daemon_reply_simple("failed", "reason = %s", "Out of memory", NULL);
+	return reply_fail("out of memory");
+}
+
+/* Test if the doubles are close enough to be considered equal */
+static int close_enough(double d1, double d2)
+{
+	return fabs(d1 - d2) < DBL_EPSILON;
 }
 
 static int compare_value(struct dm_config_value *a, struct dm_config_value *b)
@@ -573,7 +513,7 @@ static int compare_value(struct dm_config_value *a, struct dm_config_value *b)
 
 	switch (a->type) {
 	case DM_CFG_STRING: r = strcmp(a->v.str, b->v.str); break;
-	case DM_CFG_FLOAT: r = (a->v.f == b->v.f) ? 0 : (a->v.f > b->v.f) ? 1 : -1; break;
+	case DM_CFG_FLOAT: r = close_enough(a->v.f, b->v.f) ? 0 : (a->v.f > b->v.f) ? 1 : -1; break;
 	case DM_CFG_INT: r = (a->v.i == b->v.i) ? 0 : (a->v.i > b->v.i) ? 1 : -1; break;
 	case DM_CFG_EMPTY_ARRAY: return 0;
 	}
@@ -596,7 +536,7 @@ static int compare_config(struct dm_config_node *a, struct dm_config_node *b)
 		result = compare_config(a->child, b->child);
 
 	if (result) {
-		debug("config inequality at %s / %s\n", a->key, b->key);
+		// DEBUGLOG("config inequality at %s / %s", a->key, b->key);
 		return result;
 	}
 
@@ -610,7 +550,7 @@ static int compare_config(struct dm_config_node *a, struct dm_config_node *b)
 	return result;
 }
 
-static int vg_remove_if_missing(lvmetad_state *s, const char *vgid);
+static int vg_remove_if_missing(lvmetad_state *s, const char *vgid, int update_pvids);
 
 /* You need to be holding the pvid_to_vgid lock already to call this. */
 static int update_pvid_to_vgid(lvmetad_state *s, struct dm_config_tree *vg,
@@ -622,6 +562,7 @@ static int update_pvid_to_vgid(lvmetad_state *s, struct dm_config_tree *vg,
 	const char *pvid;
 	const char *vgid_old;
 	const char *check_vgid;
+	int r = 0;
 
 	if (!vgid)
 		return 0;
@@ -636,25 +577,26 @@ static int update_pvid_to_vgid(lvmetad_state *s, struct dm_config_tree *vg,
 		if (nuke_empty &&
 		    (vgid_old = dm_hash_lookup(s->pvid_to_vgid, pvid)) &&
 		    !dm_hash_insert(to_check, vgid_old, (void*) 1))
-			return 0;
+			goto out;
 
 		if (!dm_hash_insert(s->pvid_to_vgid, pvid, (void*) vgid))
-			return 0;
+			goto out;
 
-		debug("remap PV %s to VG %s\n", pvid, vgid);
+		DEBUGLOG(s, "moving PV %s to VG %s", pvid, vgid);
 	}
 
-	for (n = dm_hash_get_first(to_check); n;
-	     n = dm_hash_get_next(to_check, n)) {
+	dm_hash_iterate(n, to_check) {
 		check_vgid = dm_hash_get_key(to_check, n);
 		lock_vg(s, check_vgid);
-		vg_remove_if_missing(s, check_vgid);
+		vg_remove_if_missing(s, check_vgid, 0);
 		unlock_vg(s, check_vgid);
 	}
 
+	r = 1;
+    out:
 	dm_hash_destroy(to_check);
 
-	return 1;
+	return r;
 }
 
 /* A pvid map lock needs to be held if update_pvids = 1. */
@@ -665,24 +607,29 @@ static int remove_metadata(lvmetad_state *s, const char *vgid, int update_pvids)
 	lock_vgid_to_metadata(s);
 	old = dm_hash_lookup(s->vgid_to_metadata, vgid);
 	oldname = dm_hash_lookup(s->vgid_to_vgname, vgid);
-	unlock_vgid_to_metadata(s);
 
-	if (!old)
+	if (!old) {
+		unlock_vgid_to_metadata(s);
 		return 0;
+	}
+
 	assert(oldname);
 
-	if (update_pvids)
-		update_pvid_to_vgid(s, old, "#orphan", 0);
 	/* need to update what we have since we found a newer version */
 	dm_hash_remove(s->vgid_to_metadata, vgid);
 	dm_hash_remove(s->vgid_to_vgname, vgid);
 	dm_hash_remove(s->vgname_to_vgid, oldname);
+	unlock_vgid_to_metadata(s);
+
+	if (update_pvids)
+		/* FIXME: What should happen when update fails */
+		update_pvid_to_vgid(s, old, "#orphan", 0);
 	dm_config_destroy(old);
 	return 1;
 }
 
 /* The VG must be locked. */
-static int vg_remove_if_missing(lvmetad_state *s, const char *vgid)
+static int vg_remove_if_missing(lvmetad_state *s, const char *vgid, int update_pvids)
 {
 	struct dm_config_tree *vg;
 	struct dm_config_node *pv;
@@ -708,8 +655,8 @@ static int vg_remove_if_missing(lvmetad_state *s, const char *vgid)
 	}
 
 	if (missing) {
-		debug("nuking VG %s\n", vgid);
-		remove_metadata(s, vgid, 0);
+		DEBUGLOG(s, "removing empty VG %s", vgid);
+		remove_metadata(s, vgid, update_pvids);
 	}
 
 	unlock_pvid_to_pvmeta(s);
@@ -721,9 +668,9 @@ static int vg_remove_if_missing(lvmetad_state *s, const char *vgid)
  * this function, so they can be safely destroyed after update_metadata returns
  * (anything that might have been retained is copied). */
 static int update_metadata(lvmetad_state *s, const char *name, const char *_vgid,
-			   struct dm_config_node *metadata)
+			   struct dm_config_node *metadata, int64_t *oldseq)
 {
-	struct dm_config_tree *cft;
+	struct dm_config_tree *cft = NULL;
 	struct dm_config_tree *old;
 	int retval = 0;
 	int seq;
@@ -734,37 +681,42 @@ static int update_metadata(lvmetad_state *s, const char *name, const char *_vgid
 
 	lock_vgid_to_metadata(s);
 	old = dm_hash_lookup(s->vgid_to_metadata, _vgid);
-	lock_vg(s, _vgid);
+	oldname = dm_hash_lookup(s->vgid_to_vgname, _vgid);
 	unlock_vgid_to_metadata(s);
+	lock_vg(s, _vgid);
 
 	seq = dm_config_find_int(metadata, "metadata/seqno", -1);
 
-	if (old) {
+	if (old)
 		haveseq = dm_config_find_int(old->root, "metadata/seqno", -1);
-		oldname = dm_hash_lookup(s->vgid_to_vgname, _vgid);
-		assert(oldname);
-	}
 
 	if (seq < 0)
 		goto out;
 
 	filter_metadata(metadata); /* sanitize */
 
+	if (oldseq) {
+		if (old)
+			*oldseq = haveseq;
+		else
+			*oldseq = seq;
+	}
+
 	if (seq == haveseq) {
 		retval = 1;
 		if (compare_config(metadata, old->root))
 			retval = 0;
-		debug("Not updating metadata for %s at %d (%s)\n", _vgid, haveseq,
+		DEBUGLOG(s, "Not updating metadata for %s at %d (%s)", _vgid, haveseq,
 		      retval ? "ok" : "MISMATCH");
 		if (!retval) {
-			debug_cft("OLD: ", old->root);
-			debug_cft("NEW: ", metadata);
+			DEBUGLOG_cft(s, "OLD: ", old->root);
+			DEBUGLOG_cft(s, "NEW: ", metadata);
 		}
 		goto out;
 	}
 
 	if (seq < haveseq) {
-		debug("Refusing to update metadata for %s at %d to %d\n", _vgid, haveseq, seq);
+		DEBUGLOG(s, "Refusing to update metadata for %s (at %d) to %d", _vgid, haveseq, seq);
 		/* TODO: notify the client that their metadata is out of date? */
 		retval = 1;
 		goto out;
@@ -772,39 +724,51 @@ static int update_metadata(lvmetad_state *s, const char *name, const char *_vgid
 
 	if (!(cft = dm_config_create()) ||
 	    !(cft->root = dm_config_clone_node(cft, metadata, 0))) {
-		debug("Out of memory\n");
+		ERROR(s, "Out of memory");
 		goto out;
 	}
 
 	vgid = dm_config_find_str(cft->root, "metadata/id", NULL);
 
 	if (!vgid || !name) {
-		debug("Name '%s' or uuid '%s' missing!\n", name, vgid);
+		DEBUGLOG(s, "Name '%s' or uuid '%s' missing!", name, vgid);
 		goto out;
 	}
 
 	lock_pvid_to_vgid(s);
 
 	if (haveseq >= 0 && haveseq < seq) {
-		debug("Updating metadata for %s at %d to %d\n", _vgid, haveseq, seq);
+		INFO(s, "Updating metadata for %s at %d to %d", _vgid, haveseq, seq);
 		/* temporarily orphan all of our PVs */
-		remove_metadata(s, vgid, 1);
+		update_pvid_to_vgid(s, old, "#orphan", 0);
 	}
 
 	lock_vgid_to_metadata(s);
-	debug("Mapping %s to %s\n", vgid, name);
+	DEBUGLOG(s, "Mapping %s to %s", vgid, name);
 
 	retval = ((cfgname = dm_pool_strdup(dm_config_memory(cft), name)) &&
 		  dm_hash_insert(s->vgid_to_metadata, vgid, cft) &&
 		  dm_hash_insert(s->vgid_to_vgname, vgid, cfgname) &&
 		  dm_hash_insert(s->vgname_to_vgid, name, (void*) vgid)) ? 1 : 0;
+
+	if (retval && oldname && strcmp(name, oldname)) {
+		const char *vgid_prev = dm_hash_lookup(s->vgname_to_vgid, oldname);
+		if (vgid_prev && !strcmp(vgid_prev, vgid))
+			dm_hash_remove(s->vgname_to_vgid, oldname);
+	}
+
+	if (haveseq >= 0 && haveseq < seq)
+		dm_config_destroy(old);
+
 	unlock_vgid_to_metadata(s);
 
 	if (retval)
-		update_pvid_to_vgid(s, cft, vgid, 1);
+		retval = update_pvid_to_vgid(s, cft, vgid, 1);
 
 	unlock_pvid_to_vgid(s);
-out:
+out: /* FIXME: We should probably abort() on partial failures. */
+	if (!retval && cft)
+		dm_config_destroy(cft);
 	unlock_vg(s, _vgid);
 	return retval;
 }
@@ -814,30 +778,64 @@ static response pv_gone(lvmetad_state *s, request r)
 	const char *pvid = daemon_request_str(r, "uuid", NULL);
 	int64_t device = daemon_request_int(r, "device", 0);
 	struct dm_config_tree *pvmeta;
+	char *pvid_old, *vgid;
 
-	debug("pv_gone: %s / %" PRIu64 "\n", pvid, device);
+	DEBUGLOG(s, "pv_gone: %s / %" PRIu64, pvid, device);
 
 	lock_pvid_to_pvmeta(s);
 	if (!pvid && device > 0)
 		pvid = dm_hash_lookup_binary(s->device_to_pvid, &device, sizeof(device));
 	if (!pvid) {
 		unlock_pvid_to_pvmeta(s);
-		return daemon_reply_simple("unknown", "reason = %s", "device not in cache", NULL);
+		return reply_unknown("device not in cache");
 	}
 
-	debug("pv_gone (updated): %s / %" PRIu64 "\n", pvid, device);
+	DEBUGLOG(s, "pv_gone (updated): %s / %" PRIu64, pvid, device);
 
 	pvmeta = dm_hash_lookup(s->pvid_to_pvmeta, pvid);
+	pvid_old = dm_hash_lookup_binary(s->device_to_pvid, &device, sizeof(device));
+	vgid = dm_hash_lookup(s->pvid_to_vgid, pvid);
+
 	dm_hash_remove_binary(s->device_to_pvid, &device, sizeof(device));
 	dm_hash_remove(s->pvid_to_pvmeta, pvid);
-	vg_remove_if_missing(s, dm_hash_lookup(s->pvid_to_vgid, pvid));
 	unlock_pvid_to_pvmeta(s);
 
-	if (pvmeta) {
-		dm_config_destroy(pvmeta);
-		return daemon_reply_simple("OK", NULL);
-	} else
-		return daemon_reply_simple("unknown", "reason = %s", "PVID does not exist", NULL);
+	dm_free(pvid_old);
+
+	if (vgid) {
+		if (!(vgid = dm_strdup(vgid)))
+			return reply_fail("out of memory");
+
+		lock_vg(s, vgid);
+		vg_remove_if_missing(s, vgid, 1);
+		unlock_vg(s, vgid);
+		dm_free(vgid);
+	}
+
+	if (!pvmeta)
+		return reply_unknown("PVID does not exist");
+
+	dm_config_destroy(pvmeta);
+
+	return daemon_reply_simple("OK", NULL);
+}
+
+static response pv_clear_all(lvmetad_state *s, request r)
+{
+	DEBUGLOG(s, "pv_clear_all");
+
+	lock_pvid_to_pvmeta(s);
+	lock_pvid_to_vgid(s);
+	lock_vgid_to_metadata(s);
+
+	destroy_metadata_hashes(s);
+	create_metadata_hashes(s);
+
+	unlock_pvid_to_vgid(s);
+	unlock_vgid_to_metadata(s);
+	unlock_pvid_to_pvmeta(s);
+
+	return daemon_reply_simple("OK", NULL);
 }
 
 static response pv_found(lvmetad_state *s, request r)
@@ -846,59 +844,89 @@ static response pv_found(lvmetad_state *s, request r)
 	const char *pvid = daemon_request_str(r, "pvmeta/id", NULL);
 	const char *vgname = daemon_request_str(r, "vgname", NULL);
 	const char *vgid = daemon_request_str(r, "metadata/id", NULL);
+	const char *vgid_old = NULL;
 	struct dm_config_node *pvmeta = dm_config_find_node(r.cft->root, "pvmeta");
-	uint64_t device;
-	struct dm_config_tree *cft, *pvmeta_old = NULL;
-	const char *old;
-	const char *pvid_dup;
+	uint64_t device, device_old_pvid = 0;
+	struct dm_config_tree *cft, *pvmeta_old_dev = NULL, *pvmeta_old_pvid = NULL;
+	char *old;
+	char *pvid_dup;
 	int complete = 0, orphan = 0;
+	int64_t seqno = -1, seqno_old = -1, changed = 0;
 
 	if (!pvid)
-		return daemon_reply_simple("failed", "reason = %s", "need PV UUID", NULL);
+		return reply_fail("need PV UUID");
 	if (!pvmeta)
-		return daemon_reply_simple("failed", "reason = %s", "need PV metadata", NULL);
+		return reply_fail("need PV metadata");
 
 	if (!dm_config_get_uint64(pvmeta, "pvmeta/device", &device))
-		return daemon_reply_simple("failed", "reason = %s", "need PV device number", NULL);
+		return reply_fail("need PV device number");
 
-	debug("pv_found %s, vgid = %s, device = %" PRIu64 "\n", pvid, vgid, device);
+	if (!(cft = dm_config_create()) ||
+	    (!(pvid_dup = dm_strdup(pvid)))) {
+		if (cft)
+			dm_config_destroy(cft);
+		return reply_fail("out of memory");
+	}
 
 	lock_pvid_to_pvmeta(s);
 
+	if ((pvmeta_old_pvid = dm_hash_lookup(s->pvid_to_pvmeta, pvid)))
+		dm_config_get_uint64(pvmeta_old_pvid->root, "pvmeta/device", &device_old_pvid);
+
 	if ((old = dm_hash_lookup_binary(s->device_to_pvid, &device, sizeof(device)))) {
-		pvmeta_old = dm_hash_lookup(s->pvid_to_pvmeta, old);
+		pvmeta_old_dev = dm_hash_lookup(s->pvid_to_pvmeta, old);
 		dm_hash_remove(s->pvid_to_pvmeta, old);
+		vgid_old = dm_hash_lookup(s->pvid_to_vgid, old);
 	}
 
-	if (!(cft = dm_config_create()) ||
-	    !(cft->root = dm_config_clone_node(cft, pvmeta, 0))) {
-		unlock_pvid_to_pvmeta(s);
-		return daemon_reply_simple("failed", "reason = %s", "out of memory", NULL);
+	DEBUGLOG(s, "pv_found %s, vgid = %s, device = %" PRIu64 " (previously %" PRIu64 "), old = %s",
+		 pvid, vgid, device, device_old_pvid, old);
+
+	if (!(cft->root = dm_config_clone_node(cft, pvmeta, 0)))
+                goto out_of_mem;
+
+	if (!pvmeta_old_pvid || compare_config(pvmeta_old_pvid->root, cft->root))
+		changed |= 1;
+
+	if (pvmeta_old_pvid && device != device_old_pvid) {
+		DEBUGLOG(s, "pv %s no longer on device %" PRIu64, pvid, device_old_pvid);
+		dm_free(dm_hash_lookup_binary(s->device_to_pvid, &device_old_pvid, sizeof(device_old_pvid)));
+		dm_hash_remove_binary(s->device_to_pvid, &device_old_pvid, sizeof(device_old_pvid));
+		changed |= 1;
 	}
 
-	pvid_dup = dm_config_find_str(cft->root, "pvmeta/id", NULL);
 	if (!dm_hash_insert(s->pvid_to_pvmeta, pvid, cft) ||
 	    !dm_hash_insert_binary(s->device_to_pvid, &device, sizeof(device), (void*)pvid_dup)) {
+		dm_hash_remove(s->pvid_to_pvmeta, pvid);
+out_of_mem:
 		unlock_pvid_to_pvmeta(s);
-		return daemon_reply_simple("failed", "reason = %s", "out of memory", NULL);
+		dm_config_destroy(cft);
+		dm_free(pvid_dup);
+		dm_free(old);
+		return reply_fail("out of memory");
 	}
-	if (pvmeta_old)
-		dm_config_destroy(pvmeta_old);
 
 	unlock_pvid_to_pvmeta(s);
 
+	dm_free(old);
+
+	if (pvmeta_old_pvid)
+		dm_config_destroy(pvmeta_old_pvid);
+	if (pvmeta_old_dev && pvmeta_old_dev != pvmeta_old_pvid)
+		dm_config_destroy(pvmeta_old_dev);
+
 	if (metadata) {
 		if (!vgid)
-			return daemon_reply_simple("failed", "reason = %s", "need VG UUID", NULL);
-		debug("obtained vgid = %s, vgname = %s\n", vgid, vgname);
+			return reply_fail("need VG UUID");
+		DEBUGLOG(s, "obtained vgid = %s, vgname = %s", vgid, vgname);
 		if (!vgname)
-			return daemon_reply_simple("failed", "reason = %s", "need VG name", NULL);
+			return reply_fail("need VG name");
 		if (daemon_request_int(r, "metadata/seqno", -1) < 0)
-			return daemon_reply_simple("failed", "reason = %s", "need VG seqno", NULL);
+			return reply_fail("need VG seqno");
 
-		if (!update_metadata(s, vgname, vgid, metadata))
-			return daemon_reply_simple("failed", "reason = %s",
-						   "metadata update failed", NULL);
+		if (!update_metadata(s, vgname, vgid, metadata, &seqno_old))
+			return reply_fail("metadata update failed");
+		changed |= (seqno_old != dm_config_find_int(metadata, "metadata/seqno", -1));
 	} else {
 		lock_pvid_to_vgid(s);
 		vgid = dm_hash_lookup(s->pvid_to_vgid, pvid);
@@ -906,23 +934,41 @@ static response pv_found(lvmetad_state *s, request r)
 	}
 
 	if (vgid) {
-		if ((cft = lock_vg(s, vgid)))
+		if ((cft = lock_vg(s, vgid))) {
 			complete = update_pv_status(s, cft, cft->root, 0);
-		else if (!strcmp(vgid, "#orphan"))
+			seqno = dm_config_find_int(cft->root, "metadata/seqno", -1);
+		} else if (!strcmp(vgid, "#orphan"))
 			orphan = 1;
 		else {
 			unlock_vg(s, vgid);
-			return daemon_reply_simple("failed", "reason = %s",
-// FIXME provide meaningful-to-user error message
-						   "internal treason!", NULL);
+			return reply_fail("non-orphan VG without metadata encountered");
 		}
 		unlock_vg(s, vgid);
+
+		// TODO: separate vgid->vgname lock
+		lock_vgid_to_metadata(s);
+		vgname = dm_hash_lookup(s->vgid_to_vgname, vgid);
+		unlock_vgid_to_metadata(s);
+	}
+
+	if (vgid_old && (!vgid || strcmp(vgid, vgid_old))) {
+		/* make a copy, because vg_remove_if_missing will deallocate the
+		 * storage behind vgid_old */
+		vgid_old = dm_strdup(vgid_old);
+		lock_vg(s, vgid_old);
+		vg_remove_if_missing(s, vgid_old, 1);
+		unlock_vg(s, vgid_old);
+		dm_free((char*)vgid_old);
 	}
 
 	return daemon_reply_simple("OK",
 				   "status = %s", orphan ? "orphan" :
 				                     (complete ? "complete" : "partial"),
+				   "changed = %d", changed,
 				   "vgid = %s", vgid ? vgid : "#orphan",
+				   "vgname = %s", vgname ? vgname : "#orphan",
+				   "seqno_before = %"PRId64, seqno_old,
+				   "seqno_after = %"PRId64, seqno,
 				   NULL);
 }
 
@@ -933,17 +979,16 @@ static response vg_update(lvmetad_state *s, request r)
 	const char *vgname = daemon_request_str(r, "vgname", NULL);
 	if (metadata) {
 		if (!vgid)
-			return daemon_reply_simple("failed", "reason = %s", "need VG UUID", NULL);
+			return reply_fail("need VG UUID");
 		if (!vgname)
-			return daemon_reply_simple("failed", "reason = %s", "need VG name", NULL);
+			return reply_fail("need VG name");
 		if (daemon_request_int(r, "metadata/seqno", -1) < 0)
-			return daemon_reply_simple("failed", "reason = %s", "need VG seqno", NULL);
+			return reply_fail("need VG seqno");
 
 		/* TODO defer metadata update here; add a separate vg_commit
 		 * call; if client does not commit, die */
-		if (!update_metadata(s, vgname, vgid, metadata))
-			return daemon_reply_simple("failed", "reason = %s",
-						   "metadata update failed", NULL);
+		if (!update_metadata(s, vgname, vgid, metadata, NULL))
+			return reply_fail("metadata update failed");
 	}
 	return daemon_reply_simple("OK", NULL);
 }
@@ -953,9 +998,9 @@ static response vg_remove(lvmetad_state *s, request r)
 	const char *vgid = daemon_request_str(r, "uuid", NULL);
 
 	if (!vgid)
-		return daemon_reply_simple("failed", "reason = %s", "need VG UUID", NULL);
+		return reply_fail("need VG UUID");
 
-	fprintf(stderr, "vg_remove: %s\n", vgid);
+	DEBUGLOG(s, "vg_remove: %s", vgid);
 
 	lock_pvid_to_vgid(s);
 	remove_metadata(s, vgid, 1);
@@ -964,10 +1009,104 @@ static response vg_remove(lvmetad_state *s, request r)
 	return daemon_reply_simple("OK", NULL);
 }
 
+static void _dump_cft(struct buffer *buf, struct dm_hash_table *ht, const char *key_addr)
+{
+	struct dm_hash_node *n;
+
+	dm_hash_iterate(n, ht) {
+		struct dm_config_tree *cft = dm_hash_get_data(ht, n);
+		const char *key_backup = cft->root->key;
+		cft->root->key = dm_config_find_str(cft->root, key_addr, "unknown");
+		(void) dm_config_write_node(cft->root, buffer_line, buf);
+		cft->root->key = key_backup;
+	}
+}
+
+static void _dump_pairs(struct buffer *buf, struct dm_hash_table *ht, const char *name, int int_key)
+{
+	char *append;
+	struct dm_hash_node *n;
+
+	buffer_append(buf, name);
+	buffer_append(buf, " {\n");
+
+	dm_hash_iterate(n, ht) {
+		const char *key = dm_hash_get_key(ht, n),
+			   *val = dm_hash_get_data(ht, n);
+		buffer_append(buf, "    ");
+		if (int_key)
+			(void) dm_asprintf(&append, "%d = \"%s\"", *(int*)key, val);
+		else
+			(void) dm_asprintf(&append, "%s = \"%s\"", key, val);
+		if (append)
+			buffer_append(buf, append);
+		buffer_append(buf, "\n");
+		dm_free(append);
+	}
+	buffer_append(buf, "}\n");
+}
+
+static response dump(lvmetad_state *s)
+{
+	response res = { 0 };
+	struct buffer *b = &res.buffer;
+
+	buffer_init(b);
+
+	/* Lock everything so that we get a consistent dump. */
+
+	lock_vgid_to_metadata(s);
+	lock_pvid_to_pvmeta(s);
+	lock_pvid_to_vgid(s);
+
+	buffer_append(b, "# VG METADATA\n\n");
+	_dump_cft(b, s->vgid_to_metadata, "metadata/id");
+
+	buffer_append(b, "\n# PV METADATA\n\n");
+	_dump_cft(b, s->pvid_to_pvmeta, "pvmeta/id");
+
+	buffer_append(b, "\n# VGID to VGNAME mapping\n\n");
+	_dump_pairs(b, s->vgid_to_vgname, "vgid_to_vgname", 0);
+
+	buffer_append(b, "\n# VGNAME to VGID mapping\n\n");
+	_dump_pairs(b, s->vgname_to_vgid, "vgname_to_vgid", 0);
+
+	buffer_append(b, "\n# PVID to VGID mapping\n\n");
+	_dump_pairs(b, s->pvid_to_vgid, "pvid_to_vgid", 0);
+
+	buffer_append(b, "\n# DEVICE to PVID mapping\n\n");
+	_dump_pairs(b, s->device_to_pvid, "device_to_pvid", 1);
+
+	unlock_pvid_to_vgid(s);
+	unlock_pvid_to_pvmeta(s);
+	unlock_vgid_to_metadata(s);
+
+	return res;
+}
+
 static response handler(daemon_state s, client_handle h, request r)
 {
 	lvmetad_state *state = s.private;
 	const char *rq = daemon_request_str(r, "request", "NONE");
+	const char *token = daemon_request_str(r, "token", "NONE");
+
+	pthread_mutex_lock(&state->token_lock);
+	if (!strcmp(rq, "token_update")) {
+		strncpy(state->token, token, 128);
+		state->token[127] = 0;
+		pthread_mutex_unlock(&state->token_lock);
+		return daemon_reply_simple("OK", NULL);
+	}
+
+	if (strcmp(token, state->token) && strcmp(rq, "dump")) {
+		pthread_mutex_unlock(&state->token_lock);
+		return daemon_reply_simple("token_mismatch",
+					   "expected = %s", state->token,
+					   "received = %s", token,
+					   "reason = %s",
+					   "lvmetad cache is invalid due to a global_filter change or due to a running rescan", NULL);
+	}
+	pthread_mutex_unlock(&state->token_lock);
 
 	/*
 	 * TODO Add a stats call, with transaction count/rate, time since last
@@ -978,6 +1117,9 @@ static response handler(daemon_state s, client_handle h, request r)
 
 	if (!strcmp(rq, "pv_gone"))
 		return pv_gone(state, r);
+
+	if (!strcmp(rq, "pv_clear_all"))
+		return pv_clear_all(state, r);
 
 	if (!strcmp(rq, "pv_lookup"))
 		return pv_lookup(state, r);
@@ -991,35 +1133,41 @@ static response handler(daemon_state s, client_handle h, request r)
 	if (!strcmp(rq, "vg_lookup"))
 		return vg_lookup(state, r);
 
-	if (!strcmp(rq, "pv_list")) {
+	if (!strcmp(rq, "pv_list"))
 		return pv_list(state, r);
-	}
 
 	if (!strcmp(rq, "vg_list"))
 		return vg_list(state, r);
 
-	return daemon_reply_simple("failed", "reason = %s", "no such request", NULL);
+	if (!strcmp(rq, "dump"))
+		return dump(state);
+
+	return reply_fail("request not implemented");
 }
 
 static int init(daemon_state *s)
 {
 	pthread_mutexattr_t rec;
 	lvmetad_state *ls = s->private;
+	ls->log = s->log;
 
-	ls->pvid_to_pvmeta = dm_hash_create(32);
-	ls->device_to_pvid = dm_hash_create(32);
-	ls->vgid_to_metadata = dm_hash_create(32);
-	ls->vgid_to_vgname = dm_hash_create(32);
-	ls->pvid_to_vgid = dm_hash_create(32);
-	ls->vgname_to_vgid = dm_hash_create(32);
-	ls->lock.vg = dm_hash_create(32);
 	pthread_mutexattr_init(&rec);
 	pthread_mutexattr_settype(&rec, PTHREAD_MUTEX_RECURSIVE_NP);
 	pthread_mutex_init(&ls->lock.pvid_to_pvmeta, &rec);
 	pthread_mutex_init(&ls->lock.vgid_to_metadata, &rec);
 	pthread_mutex_init(&ls->lock.pvid_to_vgid, NULL);
+	pthread_mutex_init(&ls->lock.vg_lock_map, NULL);
+	pthread_mutex_init(&ls->token_lock, NULL);
+	create_metadata_hashes(ls);
 
-	debug("initialised state: vgid_to_metadata = %p\n", ls->vgid_to_metadata);
+	ls->lock.vg = dm_hash_create(32);
+	ls->token[0] = 0;
+
+	/* Set up stderr logging depending on the -l option. */
+	if (!daemon_log_parse(ls->log, DAEMON_LOG_OUTLET_STDERR, ls->log_config, 1))
+		return 0;
+
+	DEBUGLOG(s, "initialised state: vgid_to_metadata = %p", ls->vgid_to_metadata);
 	if (!ls->pvid_to_vgid || !ls->vgid_to_metadata)
 		return 0;
 
@@ -1032,70 +1180,52 @@ static int init(daemon_state *s)
 static int fini(daemon_state *s)
 {
 	lvmetad_state *ls = s->private;
-	struct dm_hash_node *n = dm_hash_get_first(ls->vgid_to_metadata);
+	struct dm_hash_node *n;
 
-	debug("fini\n");
-	while (n) {
-		dm_config_destroy(dm_hash_get_data(ls->vgid_to_metadata, n));
-		n = dm_hash_get_next(ls->vgid_to_metadata, n);
-	}
+	DEBUGLOG(s, "fini");
 
-	n = dm_hash_get_first(ls->pvid_to_pvmeta);
-	while (n) {
-		dm_config_destroy(dm_hash_get_data(ls->pvid_to_pvmeta, n));
-		n = dm_hash_get_next(ls->pvid_to_pvmeta, n);
-	}
+	destroy_metadata_hashes(ls);
 
-	n = dm_hash_get_first(ls->lock.vg);
-	while (n) {
+	/* Destroy the lock hashes now. */
+	dm_hash_iterate(n, ls->lock.vg) {
 		pthread_mutex_destroy(dm_hash_get_data(ls->lock.vg, n));
 		free(dm_hash_get_data(ls->lock.vg, n));
-		n = dm_hash_get_next(ls->lock.vg, n);
 	}
 
 	dm_hash_destroy(ls->lock.vg);
-	dm_hash_destroy(ls->pvid_to_pvmeta);
-	dm_hash_destroy(ls->device_to_pvid);
-	dm_hash_destroy(ls->vgid_to_metadata);
-	dm_hash_destroy(ls->vgid_to_vgname);
-	dm_hash_destroy(ls->vgname_to_vgid);
-	dm_hash_destroy(ls->pvid_to_vgid);
 	return 1;
 }
 
-static void usage(char *prog, FILE *file)
+static void usage(const char *prog, FILE *file)
 {
 	fprintf(file, "Usage:\n"
-		"%s [-V] [-h] [-d] [-d] [-d] [-f]\n\n"
+		"%s [-V] [-h] [-f] [-l {all|wire|debug}] [-s path]\n\n"
 		"   -V       Show version of lvmetad\n"
 		"   -h       Show this help information\n"
-		"   -d       Log debug messages to syslog (-d, -dd, -ddd)\n"
-		"   -R       Replace a running lvmetad instance, loading its data\n"
-		"   -f       Don't fork, run in the foreground\n\n", prog);
+		"   -f       Don't fork, run in the foreground\n"
+		"   -l       Logging message level (-l {all|wire|debug})\n"
+		"   -p       Set path to the pidfile\n"
+		"   -s       Set path to the socket to listen on\n\n", prog);
 }
 
 int main(int argc, char *argv[])
 {
 	signed char opt;
-	daemon_state s = { .private = NULL };
-	lvmetad_state ls;
-	int _restart = 0;
-
-	s.name = "lvmetad";
-	s.private = &ls;
-	s.daemon_init = init;
-	s.daemon_fini = fini;
-	s.handler = handler;
-	s.socket_path = getenv("LVM_LVMETAD_SOCKET");
-	if (!s.socket_path)
-		s.socket_path = DEFAULT_RUN_DIR "/lvmetad.socket";
-	s.pidfile = DEFAULT_RUN_DIR "/lvmetad.pid";
-        s.log_level = 0;
-	s.protocol = "lvmetad";
-	s.protocol_version = 1;
+	lvmetad_state ls = { .log_config = "" };
+	daemon_state s = {
+		.daemon_fini = fini,
+		.daemon_init = init,
+		.handler = handler,
+		.name = "lvmetad",
+		.pidfile = getenv("LVM_LVMETAD_PIDFILE") ? : LVMETAD_PIDFILE,
+		.private = &ls,
+		.protocol = "lvmetad",
+		.protocol_version = 1,
+		.socket_path = getenv("LVM_LVMETAD_SOCKET") ? : LVMETAD_SOCKET,
+	};
 
 	// use getopt_long
-	while ((opt = getopt(argc, argv, "?fhVdRs:")) != EOF) {
+	while ((opt = getopt(argc, argv, "?fhVl:p:s:")) != EOF) {
 		switch (opt) {
 		case 'h':
 			usage(argv[0], stdout);
@@ -1103,24 +1233,25 @@ int main(int argc, char *argv[])
 		case '?':
 			usage(argv[0], stderr);
 			exit(0);
-		case 'R':
-			_restart++;
-			break;
 		case 'f':
 			s.foreground = 1;
 			break;
-		case 'd':
-			s.log_level++;
+		case 'l':
+			ls.log_config = optarg;
+			break;
+		case 'p':
+			s.pidfile = optarg;
 			break;
 		case 's': // --socket
 			s.socket_path = optarg;
 			break;
 		case 'V':
-			printf("lvmetad version 0\n");
+			printf("lvmetad version: " LVM_VERSION "\n");
 			exit(1);
 		}
 	}
 
 	daemon_start(s);
+
 	return 0;
 }

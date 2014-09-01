@@ -42,6 +42,7 @@ struct label {
 	char type[8];
 	uint64_t sector;
 	struct labeller *labeller;
+	struct device *dev;
 	void *info;
 };
 
@@ -87,13 +88,13 @@ struct label_ops {
 
 struct labeller {
 	struct label_ops *ops;
-	const void *private;
+	const struct format_type *fmt;
 };
 
 int label_init(void);
 void label_exit(void);
 
-int label_register_handler(const char *name, struct labeller *handler);
+int label_register_handler(struct labeller *handler);
 
 struct labeller *label_get_handler(const char *name);
 

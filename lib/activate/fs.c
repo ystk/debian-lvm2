@@ -205,7 +205,7 @@ static int _mk_link(const char *dev_dir, const char *vg_name,
 			return 0;
 		}
 	} else if (dm_udev_get_sync_support() && udev_checking() && check_udev)
-		log_warn("The link %s should had been created by udev "
+		log_warn("The link %s should have been created by udev "
 			  "but it was not found. Falling back to "
 			  "direct link creation.", lv_path);
 
@@ -486,7 +486,7 @@ int fs_rename_lv(struct logical_volume *lv, const char *dev,
 void fs_unlock(void)
 {
 	if (!critical_section()) {
-		log_debug("Syncing device names");
+		log_debug_activation("Syncing device names");
 		/* Wait for all processed udev devices */
 		if (!dm_udev_wait(_fs_cookie))
 			stack;

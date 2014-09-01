@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Copyright (C) 2008 Red Hat, Inc. All rights reserved.
 #
 # This copyrighted material is made available to anyone wishing to use,
@@ -9,18 +9,21 @@
 # along with this program; if not, write to the Free Software Foundation,
 # Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
-. lib/test
+. lib/inittest
 
-aux prepare_vg 5
+which mkfs.ext2 || skip
+aux mirror_recovery_works || skip
+
 aux prepare_dmeventd
+aux prepare_vg 5
 
-which mkfs.ext2 || exit 200
-
-lvcreate -m 3 --ig -L 1 -n 4way $vg
+lvcreate -aey --type mirror -m 3 --ignoremonitoring -L 1 -n 4way $vg
 lvchange --monitor y $vg/4way
-aux disable_dev $dev2 $dev4
-mkfs.ext2 $DM_DEV_DIR/$vg/4way
+aux disable_dev "$dev2" "$dev4"
+mkfs.ext2 "$DM_DEV_DIR/$vg/4way"
 sleep 10 # FIXME: need a "poll" utility, akin to "check"
-aux enable_dev $dev2 $dev4
+aux enable_dev "$dev2" "$dev4"
 check mirror $vg 4way
 check mirror_legs $vg 4way 2
+
+vgremove -ff $vg

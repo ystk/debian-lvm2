@@ -16,17 +16,14 @@
 #include "lib.h"
 #include "device.h"
 #include "memlock.h"
-#include "lvm-string.h"
-#include "lvm-file.h"
 #include "defaults.h"
-#include "config.h"
 
 #include <stdarg.h>
 #include <syslog.h>
 
 static FILE *_log_file;
 static struct device _log_dev;
-static struct str_list _log_dev_alias;
+static struct dm_str_list _log_dev_alias;
 
 static int _syslog = 0;
 static int _log_to_file = 0;
@@ -173,15 +170,23 @@ const char *stored_errmsg(void)
 	return _lvm_errmsg ? : "";
 }
 
+const char *stored_errmsg_with_clear(void)
+{
+	const char *rc = strdup(stored_errmsg());
+	reset_lvm_errno(1);
+	return rc;
+}
+
 static struct dm_hash_table *_duplicated = NULL;
 
 void reset_log_duplicated(void) {
-	if (_duplicated)
+	if (_duplicated) {
 		dm_hash_destroy(_duplicated);
-	_duplicated = NULL;
+		_duplicated = NULL;
+	}
 }
 
-void print_log(int level, const char *file, int line, int dm_errno,
+void print_log(int level, const char *file, int line, int dm_errno_or_class,
 	       const char *format, ...)
 {
 	va_list ap;
@@ -194,12 +199,13 @@ void print_log(int level, const char *file, int line, int dm_errno,
 	int log_once = level & _LOG_ONCE;
 	int fatal_internal_error = 0;
 	size_t msglen;
+	const char *indent_spaces = "";
+	FILE *stream;
 
 	level &= ~(_LOG_STDERR|_LOG_ONCE);
 
 	if (_abort_on_internal_errors &&
-	    !strncmp(format, INTERNAL_ERROR,
-		     strlen(INTERNAL_ERROR))) {
+	    !strncmp(format, INTERNAL_ERROR, sizeof(INTERNAL_ERROR) - 1)) {
 		fatal_internal_error = 1;
 		/* Internal errors triggering abort cannot be suppressed. */
 		_log_suppress = 0;
@@ -214,8 +220,8 @@ void print_log(int level, const char *file, int line, int dm_errno,
 
 	trformat = _(format);
 
-	if (dm_errno && !_lvm_errno)
-		_lvm_errno = dm_errno;
+	if (level < _LOG_DEBUG && dm_errno_or_class && !_lvm_errno)
+		_lvm_errno = dm_errno_or_class;
 
 	if (_lvm2_log_fn ||
 	    (_store_errmsg && (level <= _LOG_ERR)) ||
@@ -231,7 +237,7 @@ void print_log(int level, const char *file, int line, int dm_errno,
 		}
 
 		locn[sizeof(locn) - 1] = '\0';
-		message = &locn[0];
+		message = locn;
 	}
 
 /* FIXME Avoid pointless use of message buffer when it'll never be read! */
@@ -262,7 +268,8 @@ void print_log(int level, const char *file, int line, int dm_errno,
 		if (_duplicated) {
 			if (dm_hash_lookup(_duplicated, message))
 				level = _LOG_NOTICE;
-			(void) dm_hash_insert(_duplicated, message, (void*)1);
+			else
+				(void) dm_hash_insert(_duplicated, message, (void*)1);
 		}
 	}
 
@@ -274,83 +281,49 @@ void print_log(int level, const char *file, int line, int dm_errno,
 	}
 
       log_it:
-	if (!_log_suppress) {
-		if (verbose_level() > _LOG_DEBUG)
-			(void) dm_snprintf(locn, sizeof(locn), "#%s:%d ",
+	if ((verbose_level() >= level) && !_log_suppress) {
+		if (verbose_level() > _LOG_DEBUG) {
+			(void) dm_snprintf(buf, sizeof(buf), "#%s:%d ",
 					   file, line);
-		else
-			locn[0] = '\0';
+		} else
+			buf[0] = '\0';
+
+		if (_indent)
+			switch (level) {
+			case _LOG_NOTICE: indent_spaces = "  "; break;
+			case _LOG_INFO:   indent_spaces = "    "; break;
+			case _LOG_DEBUG:  indent_spaces = "      "; break;
+			default: /* nothing to do */;
+			}
 
 		va_start(ap, format);
 		switch (level) {
 		case _LOG_DEBUG:
-			if (!strcmp("<backtrace>", format) &&
-			    verbose_level() <= _LOG_DEBUG)
+			if ((verbose_level() == level) &&
+			    (strcmp("<backtrace>", format) == 0))
 				break;
-			if (verbose_level() >= _LOG_DEBUG) {
-				fprintf(stderr, "%s%s%s", locn, log_command_name(),
-					_msg_prefix);
-				if (_indent)
-					fprintf(stderr, "      ");
-				vfprintf(stderr, trformat, ap);
-				fputc('\n', stderr);
-			}
-			break;
-
-		case _LOG_INFO:
-			if (verbose_level() >= _LOG_INFO) {
-				fprintf(stderr, "%s%s%s", locn, log_command_name(),
-					_msg_prefix);
-				if (_indent)
-					fprintf(stderr, "    ");
-				vfprintf(stderr, trformat, ap);
-				fputc('\n', stderr);
-			}
-			break;
-		case _LOG_NOTICE:
-			if (verbose_level() >= _LOG_NOTICE) {
-				fprintf(stderr, "%s%s%s", locn, log_command_name(),
-					_msg_prefix);
-				if (_indent)
-					fprintf(stderr, "  ");
-				vfprintf(stderr, trformat, ap);
-				fputc('\n', stderr);
-			}
-			break;
-		case _LOG_WARN:
-			if (verbose_level() >= _LOG_WARN) {
-				fprintf(use_stderr ? stderr : stdout, "%s%s",
-					log_command_name(), _msg_prefix);
-				vfprintf(use_stderr ? stderr : stdout, trformat, ap);
-				fputc('\n', use_stderr ? stderr : stdout);
-			}
-			break;
-		case _LOG_ERR:
-			if (verbose_level() >= _LOG_ERR) {
-				fprintf(stderr, "%s%s%s", locn, log_command_name(),
-					_msg_prefix);
-				vfprintf(stderr, trformat, ap);
-				fputc('\n', stderr);
-			}
-			break;
-		case _LOG_FATAL:
+			if (verbose_level() < _LOG_DEBUG)
+				break;
+			if (!debug_class_is_logged(dm_errno_or_class))
+				break;
+			/* fall through */
 		default:
-			if (verbose_level() >= _LOG_FATAL) {
-				fprintf(stderr, "%s%s%s", locn, log_command_name(),
-					_msg_prefix);
-				vfprintf(stderr, trformat, ap);
-				fputc('\n', stderr);
-			}
-			break;
+			/* Typically only log_warn goes to stdout */
+			stream = (use_stderr || (level != _LOG_WARN)) ? stderr : stdout;
+			fprintf(stream, "%s%s%s%s", buf, log_command_name(),
+				_msg_prefix, indent_spaces);
+			vfprintf(stream, trformat, ap);
+			fputc('\n', stream);
 		}
 		va_end(ap);
 	}
 
-	if (fatal_internal_error)
-		abort();
-
-	if (level > debug_level())
+	if ((level > debug_level()) ||
+	    (level >= _LOG_DEBUG && !debug_class_is_logged(dm_errno_or_class))) {
+		if (fatal_internal_error)
+			abort();
 		return;
+	}
 
 	if (_log_to_file && (_log_while_suspended || !critical_section())) {
 		fprintf(_log_file, "%s:%d %s%s", file, line, log_command_name(),
@@ -369,6 +342,9 @@ void print_log(int level, const char *file, int line, int dm_errno,
 		vsyslog(level, trformat, ap);
 		va_end(ap);
 	}
+
+	if (fatal_internal_error)
+		abort();
 
 	/* FIXME This code is unfinished - pre-extend & condense. */
 	if (!_already_logging && _log_direct && critical_section()) {

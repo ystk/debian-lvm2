@@ -14,8 +14,6 @@
 
 #include "lib.h"
 
-#include "lvm2cmd.h"
-#include "errors.h"
 #include "libdevmapper-event.h"
 #include "dmeventd_lvm.h"
 
@@ -35,16 +33,26 @@ static int run_repair(const char *device)
 	char cmd_str[CMD_SIZE];
 
 	if (!dmeventd_lvm2_command(dmeventd_lvm2_pool(), cmd_str, sizeof(cmd_str),
-				  "lvconvert --config devices{ignore_suspended_devices=1} "
-				  "--repair --use-policies", device))
+				  "lvscan --cache", device))
 		return -1;
 
 	r = dmeventd_lvm2_run(cmd_str);
 
-	if (r != ECMD_PROCESSED)
+	if (!r)
+		syslog(LOG_INFO, "Re-scan of RAID device %s failed.", device);
+
+	if (!dmeventd_lvm2_command(dmeventd_lvm2_pool(), cmd_str, sizeof(cmd_str),
+				  "lvconvert --config devices{ignore_suspended_devices=1} "
+				  "--repair --use-policies", device))
+		return -1;
+
+	/* if repair goes OK, report success even if lvscan has failed */
+	r = dmeventd_lvm2_run(cmd_str);
+
+	if (!r)
 		syslog(LOG_INFO, "Repair of RAID device %s failed.", device);
 
-	return (r == ECMD_PROCESSED) ? 0 : -1;
+	return (r) ? 0 : -1;
 }
 
 static int _process_raid_event(char *params, const char *device)

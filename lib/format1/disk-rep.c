@@ -16,8 +16,8 @@
 #include "lib.h"
 #include "disk-rep.h"
 #include "xlate.h"
-#include "filter.h"
 #include "lvmcache.h"
+#include "metadata-exported.h"
 
 #include <fcntl.h>
 
@@ -335,7 +335,7 @@ static void __update_lvmcache(const struct format_type *fmt,
 		return;
 	}
 
-	lvmcache_set_device_size(info, xlate32(dl->pvd.pv_size) << SECTOR_SHIFT);
+	lvmcache_set_device_size(info, ((uint64_t)xlate32(dl->pvd.pv_size)) << SECTOR_SHIFT);
 	lvmcache_del_mdas(info);
 	lvmcache_make_valid(info);
 }
@@ -426,7 +426,7 @@ struct disk_list *read_disk(const struct format_type *fmt, struct device *dev,
 	return dl;
 }
 
-static void _add_pv_to_list(struct dm_list *head, struct disk_list *data)
+static void _add_pv_to_list(struct cmd_context *cmd, struct dm_list *head, struct disk_list *data)
 {
 	struct pv_disk *pvd;
 	struct disk_list *diskl;
@@ -435,14 +435,14 @@ static void _add_pv_to_list(struct dm_list *head, struct disk_list *data)
 		pvd = &diskl->pvd;
 		if (!strncmp((char *)data->pvd.pv_uuid, (char *)pvd->pv_uuid,
 			     sizeof(pvd->pv_uuid))) {
-			if (!dev_subsystem_part_major(data->dev)) {
+			if (!dev_subsystem_part_major(cmd->dev_types, data->dev)) {
 				log_very_verbose("Ignoring duplicate PV %s on "
 						 "%s", pvd->pv_uuid,
 						 dev_name(data->dev));
 				return;
 			}
 			log_very_verbose("Duplicate PV %s - using %s %s",
-					 pvd->pv_uuid, dev_subsystem_name(data->dev),
+					 pvd->pv_uuid, dev_subsystem_name(cmd->dev_types, data->dev),
 					 dev_name(data->dev));
 			dm_list_del(&diskl->list);
 			break;
@@ -469,7 +469,7 @@ static int _read_pv_in_vg(struct lvmcache_info *info, void *baton)
 	    !(b->data = read_disk(lvmcache_fmt(info), lvmcache_device(info), b->mem, b->vg_name)))
 		return 0; /* stop here */
 
-	_add_pv_to_list(b->head, b->data);
+	_add_pv_to_list(lvmcache_fmt(info)->cmd, b->head, b->data);
 	return 1;
 }
 
@@ -519,7 +519,7 @@ int read_pvs_in_vg(const struct format_type *fmt, const char *vg_name,
 	/* Otherwise do a complete scan */
 	for (dev = dev_iter_get(iter); dev; dev = dev_iter_get(iter)) {
 		if ((baton.data = read_disk(fmt, dev, mem, vg_name))) {
-			_add_pv_to_list(head, baton.data);
+			_add_pv_to_list(fmt->cmd, head, baton.data);
 		}
 	}
 	dev_iter_destroy(iter);
@@ -535,8 +535,8 @@ static int _write_vgd(struct disk_list *data)
 	struct vg_disk *vgd = &data->vgd;
 	uint64_t pos = data->pvd.vg_on_disk.base;
 
-	log_debug("Writing %s VG metadata to %s at %" PRIu64 " len %" PRIsize_t,
-		  data->pvd.vg_name, dev_name(data->dev), pos, sizeof(*vgd));
+	log_debug_metadata("Writing %s VG metadata to %s at %" PRIu64 " len %" PRIsize_t,
+			   data->pvd.vg_name, dev_name(data->dev), pos, sizeof(*vgd));
 
 	_xlate_vgd(vgd);
 	if (!dev_write(data->dev, pos, sizeof(*vgd), vgd))
@@ -560,9 +560,9 @@ static int _write_uuids(struct disk_list *data)
 			return 0;
 		}
 
-		log_debug("Writing %s uuidlist to %s at %" PRIu64 " len %d",
-			  data->pvd.vg_name, dev_name(data->dev),
-			  pos, NAME_LEN);
+		log_debug_metadata("Writing %s uuidlist to %s at %" PRIu64 " len %d",
+				   data->pvd.vg_name, dev_name(data->dev),
+				   pos, NAME_LEN);
 
 		if (!dev_write(data->dev, pos, NAME_LEN, ul->uuid))
 			return_0;
@@ -575,9 +575,9 @@ static int _write_uuids(struct disk_list *data)
 
 static int _write_lvd(struct device *dev, uint64_t pos, struct lv_disk *disk)
 {
-	log_debug("Writing %s LV %s metadata to %s at %" PRIu64 " len %"
-		  PRIsize_t, disk->vg_name, disk->lv_name, dev_name(dev),
-		  pos, sizeof(*disk));
+	log_debug_metadata("Writing %s LV %s metadata to %s at %" PRIu64 " len %"
+			   PRIsize_t, disk->vg_name, disk->lv_name, dev_name(dev),
+			   pos, sizeof(*disk));
 
 	_xlate_lvd(disk);
 	if (!dev_write(dev, pos, sizeof(*disk), disk))
@@ -621,9 +621,9 @@ static int _write_extents(struct disk_list *data)
 	struct pe_disk *extents = data->extents;
 	uint64_t pos = data->pvd.pe_on_disk.base;
 
-	log_debug("Writing %s extents metadata to %s at %" PRIu64 " len %"
-		  PRIsize_t, data->pvd.vg_name, dev_name(data->dev),
-		  pos, len);
+	log_debug_metadata("Writing %s extents metadata to %s at %" PRIu64 " len %"
+			   PRIsize_t, data->pvd.vg_name, dev_name(data->dev),
+			   pos, len);
 
 	_xlate_extents(extents, data->pvd.pe_total);
 	if (!dev_write(data->dev, pos, len, extents))
@@ -656,9 +656,9 @@ static int _write_pvd(struct disk_list *data)
 
 	memcpy(buf, &data->pvd, sizeof(struct pv_disk));
 
-	log_debug("Writing %s PV metadata to %s at %" PRIu64 " len %"
-		  PRIsize_t, data->pvd.vg_name, dev_name(data->dev),
-		  pos, size);
+	log_debug_metadata("Writing %s PV metadata to %s at %" PRIu64 " len %"
+			   PRIsize_t, data->pvd.vg_name, dev_name(data->dev),
+			   pos, size);
 
 	_xlate_pvd((struct pv_disk *) buf);
 	if (!dev_write(data->dev, pos, size, buf)) {
@@ -674,7 +674,7 @@ static int _write_pvd(struct disk_list *data)
  * assumes the device has been opened.
  */
 static int __write_all_pvd(const struct format_type *fmt __attribute__((unused)),
-			   struct disk_list *data)
+			   struct disk_list *data, int write_vg_metadata)
 {
 	const char *pv_name = dev_name(data->dev);
 
@@ -685,9 +685,9 @@ static int __write_all_pvd(const struct format_type *fmt __attribute__((unused))
 
 	/* vgcache_add(data->pvd.vg_name, data->vgd.vg_uuid, data->dev, fmt); */
 	/*
-	 * Stop here for orphan pv's.
+	 * Stop here for orphan PVs or if VG metadata write not requested.
 	 */
-	if (data->pvd.vg_name[0] == '\0') {
+	if ((data->pvd.vg_name[0] == '\0') || !write_vg_metadata) {
 		/* if (!test_mode())
 		   vgcache_add(data->pvd.vg_name, NULL, data->dev, fmt); */
 		return 1;
@@ -723,14 +723,17 @@ static int __write_all_pvd(const struct format_type *fmt __attribute__((unused))
 /*
  * opens the device and hands to the above fn.
  */
-static int _write_all_pvd(const struct format_type *fmt, struct disk_list *data)
+static int _write_all_pvd(const struct format_type *fmt, struct disk_list *data, int write_vg_metadata)
 {
 	int r;
+
+	if (!data->dev)
+		return_0;
 
 	if (!dev_open(data->dev))
 		return_0;
 
-	r = __write_all_pvd(fmt, data);
+	r = __write_all_pvd(fmt, data, write_vg_metadata);
 
 	if (!dev_close(data->dev))
 		stack;
@@ -743,12 +746,12 @@ static int _write_all_pvd(const struct format_type *fmt, struct disk_list *data)
  * little sanity checking, so make sure correct
  * data is passed to here.
  */
-int write_disks(const struct format_type *fmt, struct dm_list *pvs)
+int write_disks(const struct format_type *fmt, struct dm_list *pvs, int write_vg_metadata)
 {
 	struct disk_list *dl;
 
 	dm_list_iterate_items(dl, pvs) {
-		if (!(_write_all_pvd(fmt, dl)))
+		if (!(_write_all_pvd(fmt, dl, write_vg_metadata)))
 			return_0;
 
 		log_very_verbose("Successfully wrote data to %s",

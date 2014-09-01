@@ -9,23 +9,23 @@
 # along with this program; if not, write to the Free Software Foundation,
 # Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
-. lib/test
+. lib/inittest
 
 # use small default size  - 512KB
 aux lvmconf 'devices/pv_min_size = 512'
 
 aux prepare_pvs 1 8
 
-check pv_field $dev1 pv_name $dev1
+check pv_field "$dev1" pv_name "$dev1"
 
 # increase min size beyond created PV size 10MB
 aux lvmconf 'devices/pv_min_size = 10240'
 
 # and test device is not visible
-not check pv_field $dev1 pv_name $dev1
+not check pv_field "$dev1" pv_name "$dev1"
 
 # set too low value errornous value
 aux lvmconf 'devices/pv_min_size = -100'
 
 # check the incorrect value is printed
-pvs $dev1 2>&1 | grep -- -100
+pvs "$dev1" 2>&1 | grep -- -100

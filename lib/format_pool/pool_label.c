@@ -16,7 +16,6 @@
 #include "lib.h"
 #include "label.h"
 #include "metadata.h"
-#include "xlate.h"
 #include "disk_rep.h"
 #include "pool_label.h"
 
@@ -100,7 +99,7 @@ struct labeller *pool_labeller_create(struct format_type *fmt)
 	}
 
 	l->ops = &_pool_ops;
-	l->private = (const void *) fmt;
+	l->fmt = fmt;
 
 	return l;
 }

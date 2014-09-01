@@ -13,7 +13,7 @@
 export LVM_CLVMD_BINARY=clvmd
 export LVM_BINARY=lvm
 
-. lib/test
+. lib/inittest
 
 # only clvmd based test, skip otherwise
 test -e LOCAL_CLVMD || skip
@@ -46,8 +46,19 @@ test "$LOCAL_CLVMD" -eq "$NEW_LOCAL_CLVMD"
 
 # FIXME: Hmm - how could we test exclusivity is preserved in singlenode ?
 lvchange -an $vg/$lv1
-lvchange -ay $vg/$lv1
+lvchange -aey $vg/$lv1
+lvcreate -s -l3 -n snap $vg/$lv1
 
 "$LVM_CLVMD_BINARY" -R
+
+vgchange -an $vg
+
+# Test what happens after 'reboot'
+kill "$LOCAL_CLVMD"
+while test -e "/var/run/clvmd.pid"; do echo -n .; sleep .1; done # wait for the pid removal
+aux prepare_clvmd
+
+vgchange -ay $vg
+lvremove -f $vg/snap
 
 vgremove -ff $vg

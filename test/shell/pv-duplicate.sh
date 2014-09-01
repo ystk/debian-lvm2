@@ -11,15 +11,15 @@
 
 # 'Exercise duplicate metadata diagnostics'
 
-. lib/test
+. lib/inittest
 
 aux prepare_devs 3
 
-vgcreate -c n --metadatasize 128k $vg1 $dev1
+vgcreate --metadatasize 128k $vg1 "$dev1"
 
 # copy mda
-dd if=$dev1 of=$dev2 bs=256K count=1
-dd if=$dev1 of=$dev3 bs=256K count=1
+dd if="$dev1" of="$dev2" bs=256K count=1
+dd if="$dev1" of="$dev3" bs=256K count=1
 
-pvs $dev1
+pvs "$dev3" -o pv_uuid
 vgs $vg1

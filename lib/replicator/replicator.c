@@ -17,12 +17,9 @@
 #include "metadata.h"
 #include "segtype.h"
 #include "text_export.h"
-#include "text_import.h"
-#include "config.h"
 #include "activate.h"
 #include "str_list.h"
 #ifdef DMEVENTD
-#  include "sharedlib.h"
 #  include "libdevmapper-event.h"
 #endif
 
@@ -338,7 +335,7 @@ static int _replicator_add_target_line(struct dev_manager *dm,
 	if (!seg->rlog_lv)
 		return_0;
 
-	if (!(rlog_dlid = build_dm_uuid(mem, seg->rlog_lv->lvid.s, NULL)))
+	if (!(rlog_dlid = build_dm_uuid(mem, seg->rlog_lv, NULL)))
 		return_0;
 
 	dm_list_iterate_items(rsite, &seg->lv->rsites) {
@@ -366,7 +363,7 @@ static int _replicator_add_target_line(struct dev_manager *dm,
 
 /* FIXME: write something useful for replicator here */
 static int _replicator_target_percent(void **target_state,
-				      percent_t *percent,
+				      dm_percent_t *percent,
 				      struct dm_pool *mem,
 				      struct cmd_context *cmd,
 				      struct lv_segment *seg,
@@ -629,7 +626,7 @@ static int _replicator_dev_add_target_line(struct dev_manager *dm,
 					      cmd->use_linear_target,
 					      seg->lv->vg->name, seg->lv->name))
 			return_0;
-		if (!(rdev_dlid = build_dm_uuid(mem, seg->lv->rdevice->lv->lvid.s, NULL)))
+		if (!(rdev_dlid = build_dm_uuid(mem, seg->lv->rdevice->lv, NULL)))
 			return_0;
 		return dm_tree_node_add_target_area(node, NULL, rdev_dlid, 0);
 	} else if (seg->lv->rdevice->rsite->site_index) {
@@ -644,7 +641,7 @@ static int _replicator_dev_add_target_line(struct dev_manager *dm,
 	 * must be present in dm_tree
 	 */
 	if (!seg_is_replicator_dev(seg) ||
-	    !(replicator_dlid = build_dm_uuid(mem, seg->replicator->lvid.s, NULL)))
+	    !(replicator_dlid = build_dm_uuid(mem, seg->replicator, NULL)))
 		return_0;
 
 	/* Select remote devices with the same device index */
@@ -668,7 +665,7 @@ static int _replicator_dev_add_target_line(struct dev_manager *dm,
 		}
 
 		if (!rdev->lv ||
-		    !(rdev_dlid = build_dm_uuid(mem, rdev->lv->lvid.s, NULL)))
+		    !(rdev_dlid = build_dm_uuid(mem, rdev->lv, NULL)))
 			return_0;
 
 		slog_dlid = NULL;
@@ -677,7 +674,7 @@ static int _replicator_dev_add_target_line(struct dev_manager *dm,
 		if (rdev->slog) {
 			slog_flags = DM_NOSYNC;
 			slog_size = (uint32_t) rdev->slog->size;
-			if (!(slog_dlid = build_dm_uuid(mem, rdev->slog->lvid.s, NULL)))
+			if (!(slog_dlid = build_dm_uuid(mem, rdev->slog, NULL)))
 				return_0;
 		} else if (rdev->slog_name &&
 			   sscanf(rdev->slog_name, "%" PRIu32, &slog_size) == 1) {
@@ -712,7 +709,7 @@ static int _replicator_dev_add_target_line(struct dev_manager *dm,
 
 /* FIXME: write something useful for replicator-dev here */
 static int _replicator_dev_target_percent(void **target_state,
-					  percent_t *percent,
+					  dm_percent_t *percent,
 					  struct dm_pool *mem,
 					  struct cmd_context *cmd,
 					  struct lv_segment *seg,

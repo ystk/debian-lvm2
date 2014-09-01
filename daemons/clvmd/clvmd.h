@@ -53,13 +53,12 @@ struct localsock_bits {
 	int finished;		/* Flag to tell subthread to exit */
 	int all_success;	/* Set to 0 if any node (or the pre_command)
 				   failed */
+	int cleanup_needed;     /* helper for cleanup_zombie */
 	struct local_client *pipe_client;
 	pthread_t threadid;
-	enum { PRE_COMMAND, POST_COMMAND, QUIT } state;
+	enum { PRE_COMMAND, POST_COMMAND } state;
 	pthread_mutex_t mutex;	/* Main thread and worker synchronisation */
 	pthread_cond_t cond;
-
-	pthread_mutex_t reply_mutex;	/* Protect reply structure */
 };
 
 /* Entries for PIPE clients */
@@ -95,7 +94,7 @@ struct local_client {
 	} bits;
 };
 
-#define DEBUGLOG(fmt, args...) debuglog(fmt, ## args);
+#define DEBUGLOG(fmt, args...) debuglog(fmt, ## args)
 
 #ifndef max
 #define max(a,b) ((a)>(b)?(a):(b))
@@ -119,6 +118,7 @@ extern void debuglog(const char *fmt, ... )
 
 void clvmd_set_debug(debug_t new_de);
 debug_t clvmd_get_debug(void);
+int clvmd_get_foreground(void);
 
 int sync_lock(const char *resource, int mode, int flags, int *lockid);
 int sync_unlock(const char *resource, int lockid);

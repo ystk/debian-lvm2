@@ -17,6 +17,7 @@
 #define _LVM_CACHE_H
 
 #include "dev-cache.h"
+#include "dev-type.h"
 #include "uuid.h"
 #include "label.h"
 #include "locking.h"
@@ -41,7 +42,7 @@ struct lvmcache_vginfo;
 int lvmcache_init(void);
 void lvmcache_allow_reads_with_lvmetad(void);
 
-void lvmcache_destroy(struct cmd_context *cmd, int retain_orphans);
+void lvmcache_destroy(struct cmd_context *cmd, int retain_orphans, int reset);
 
 /* Set full_scan to 1 to reread every filtered device label or
  * 2 to rescan /dev for new devices */
@@ -87,17 +88,17 @@ int lvmcache_vgname_is_locked(const char *vgname);
 
 void lvmcache_seed_infos_from_lvmetad(struct cmd_context *cmd);
 
-/* Returns list of struct str_lists containing pool-allocated copy of vgnames */
+/* Returns list of struct dm_str_list containing pool-allocated copy of vgnames */
 /* If include_internal is not set, return only proper vg names. */
 struct dm_list *lvmcache_get_vgnames(struct cmd_context *cmd,
 				     int include_internal);
 
-/* Returns list of struct str_lists containing pool-allocated copy of vgids */
+/* Returns list of struct dm_str_list containing pool-allocated copy of vgids */
 /* If include_internal is not set, return only proper vg ids. */
 struct dm_list *lvmcache_get_vgids(struct cmd_context *cmd,
 				   int include_internal);
 
-/* Returns list of struct str_lists containing pool-allocated copy of pvids */
+/* Returns list of struct dm_str_list containing pool-allocated copy of pvids */
 struct dm_list *lvmcache_get_pvids(struct cmd_context *cmd, const char *vgname,
 				const char *vgid);
 
@@ -118,9 +119,11 @@ int lvmcache_populate_pv_fields(struct lvmcache_info *info,
 int lvmcache_check_format(struct lvmcache_info *info, const struct format_type *fmt);
 void lvmcache_del_mdas(struct lvmcache_info *info);
 void lvmcache_del_das(struct lvmcache_info *info);
+void lvmcache_del_bas(struct lvmcache_info *info);
 int lvmcache_add_mda(struct lvmcache_info *info, struct device *dev,
 		     uint64_t start, uint64_t size, unsigned ignored);
 int lvmcache_add_da(struct lvmcache_info *info, uint64_t start, uint64_t size);
+int lvmcache_add_ba(struct lvmcache_info *info, uint64_t start, uint64_t size);
 
 const struct format_type *lvmcache_fmt(struct lvmcache_info *info);
 struct label *lvmcache_get_label(struct lvmcache_info *info);
@@ -128,11 +131,16 @@ struct label *lvmcache_get_label(struct lvmcache_info *info);
 void lvmcache_update_pv(struct lvmcache_info *info, struct physical_volume *pv,
 			const struct format_type *fmt);
 int lvmcache_update_das(struct lvmcache_info *info, struct physical_volume *pv);
+int lvmcache_update_bas(struct lvmcache_info *info, struct physical_volume *pv);
 int lvmcache_foreach_mda(struct lvmcache_info *info,
 			 int (*fun)(struct metadata_area *, void *),
 			 void *baton);
 
 int lvmcache_foreach_da(struct lvmcache_info *info,
+			int (*fun)(struct disk_locn *, void *),
+			void *baton);
+
+int lvmcache_foreach_ba(struct lvmcache_info *info,
 			int (*fun)(struct disk_locn *, void *),
 			void *baton);
 
@@ -145,8 +153,8 @@ struct device *lvmcache_device(struct lvmcache_info *info);
 void lvmcache_make_valid(struct lvmcache_info *info);
 int lvmcache_is_orphan(struct lvmcache_info *info);
 int lvmcache_uncertain_ownership(struct lvmcache_info *info);
-int lvmcache_mda_count(struct lvmcache_info *info);
+unsigned lvmcache_mda_count(struct lvmcache_info *info);
 int lvmcache_vgid_is_cached(const char *vgid);
-int lvmcache_smallest_mda_size(struct lvmcache_info *info);
+uint64_t lvmcache_smallest_mda_size(struct lvmcache_info *info);
 
 #endif

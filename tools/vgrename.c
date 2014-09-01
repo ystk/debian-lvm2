@@ -62,7 +62,7 @@ static int vg_rename_path(struct cmd_context *cmd, const char *old_vg_path,
 	int match = 0;
 	int found_id = 0;
 	struct dm_list *vgids;
-	struct str_list *sl;
+	struct dm_str_list *sl;
 	const char *vg_name_new;
 	const char *vgid = NULL, *vg_name, *vg_name_old;
 	char old_path[NAME_LEN], new_path[NAME_LEN];
@@ -82,6 +82,8 @@ static int vg_rename_path(struct cmd_context *cmd, const char *old_vg_path,
 	/* populate lvmcache */
 	if (!lvmetad_vg_list_to_lvmcache(cmd))
 		stack;
+
+	lvmcache_label_scan(cmd, 2);
 
 	/* Avoid duplicates */
 	if (!(vgids = get_vgids(cmd, 0)) || dm_list_empty(vgids)) {
@@ -177,12 +179,13 @@ static int vg_rename_path(struct cmd_context *cmd, const char *old_vg_path,
 	unlock_vg(cmd, vg_name_new);
 	unlock_and_release_vg(cmd, vg, vg_name_old);
 
-	log_print("Volume group \"%s\" successfully renamed to \"%s\"",
-		  vg_name_old, vg_name_new);
+	log_print_unless_silent("Volume group \"%s\" successfully renamed to \"%s\"",
+				vg_name_old, vg_name_new);
 
 	/* FIXME lvmcache corruption - vginfo duplicated instead of renamed */
-	persistent_filter_wipe(cmd->filter);
-	lvmcache_destroy(cmd, 1);
+	if (cmd->filter->wipe)
+		cmd->filter->wipe(cmd->filter);
+	lvmcache_destroy(cmd, 1, 0);
 
 	return 1;
 
@@ -204,10 +207,8 @@ int vgrename(struct cmd_context *cmd, int argc, char **argv)
 		return EINVALID_CMD_LINE;
 	}
 
-	if (!vg_rename_path(cmd, argv[0], argv[1])) {
-		stack;
-		return ECMD_FAILED;
-	}
+	if (!vg_rename_path(cmd, argv[0], argv[1]))
+		return_ECMD_FAILED;
 
 	return ECMD_PROCESSED;
 }

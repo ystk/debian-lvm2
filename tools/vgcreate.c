@@ -43,10 +43,10 @@ int vgcreate(struct cmd_context *cmd, int argc, char **argv)
 
 	vgcreate_params_set_defaults(&vp_def, NULL);
 	vp_def.vg_name = vg_name;
-	if (vgcreate_params_set_from_args(cmd, &vp_new, &vp_def))
+	if (!vgcreate_params_set_from_args(cmd, &vp_new, &vp_def))
 		return EINVALID_CMD_LINE;
 
-	if (vgcreate_params_validate(cmd, &vp_new))
+	if (!vgcreate_params_validate(cmd, &vp_new))
 	    return EINVALID_CMD_LINE;
 
 	lvmcache_seed_infos_from_lvmetad(cmd);
@@ -62,6 +62,9 @@ int vgcreate(struct cmd_context *cmd, int argc, char **argv)
 		return ECMD_FAILED;
 	}
 
+	if (vg->fid->fmt->features & FMT_CONFIG_PROFILE)
+		vg->profile = vg->cmd->profile_params->global_metadata_profile;
+
 	if (!vg_set_extent_size(vg, vp_new.extent_size) ||
 	    !vg_set_max_lv(vg, vp_new.max_lv) ||
 	    !vg_set_max_pv(vg, vp_new.max_pv) ||
@@ -70,7 +73,7 @@ int vgcreate(struct cmd_context *cmd, int argc, char **argv)
 	    !vg_set_mda_copies(vg, vp_new.vgmetadatacopies))
 		goto bad_orphan;
 
-	if (!lock_vol(cmd, VG_ORPHANS, LCK_VG_WRITE)) {
+	if (!lock_vol(cmd, VG_ORPHANS, LCK_VG_WRITE, NULL)) {
 		log_error("Can't get lock for orphan PVs");
 		goto bad_orphan;
 	}
@@ -119,8 +122,8 @@ int vgcreate(struct cmd_context *cmd, int argc, char **argv)
 
 	backup(vg);
 
-	log_print("%s%colume group \"%s\" successfully created",
-		  clustered_message, *clustered_message ? 'v' : 'V', vg->name);
+	log_print_unless_silent("%s%colume group \"%s\" successfully created",
+				clustered_message, *clustered_message ? 'v' : 'V', vg->name);
 
 	release_vg(vg);
 	return ECMD_PROCESSED;

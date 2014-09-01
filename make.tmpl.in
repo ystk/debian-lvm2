@@ -1,7 +1,7 @@
 # @configure_input@
 #
 # Copyright (C) 2001-2004 Sistina Software, Inc. All rights reserved.
-# Copyright (C) 2004-2011 Red Hat, Inc. All rights reserved.
+# Copyright (C) 2004-2014 Red Hat, Inc. All rights reserved.
 #
 # This file is part of LVM2.
 #
@@ -17,7 +17,18 @@ SHELL = /bin/sh
 
 @SET_MAKE@
 
+# Allow environment to override any built-in default value for CC.
+# If there is a built-in default, CC is NOT set to @CC@ here.
 CC ?= @CC@
+
+# If $(CC) holds the usual built-in default value of 'cc' then replace it with
+# the configured value.
+# (To avoid this and force the use of 'cc' from the environment, supply its
+# full path.)
+ifeq ($(CC), cc)
+  CC = @CC@
+endif
+
 RANLIB = @RANLIB@
 INSTALL = @INSTALL@
 MKDIR_P = @MKDIR_P@
@@ -28,23 +39,28 @@ LN_S = @LN_S@
 SED = @SED@
 CFLOW_CMD = @CFLOW_CMD@
 AWK = @AWK@
+PYTHON = @PYTHON@
 
 LIBS = @LIBS@
 # Extra libraries always linked with static binaries
-STATIC_LIBS = $(SELINUX_LIBS) $(UDEV_LIBS)
+STATIC_LIBS = $(SELINUX_LIBS) $(UDEV_LIBS) $(BLKID_LIBS)
 DEFS += @DEFS@
+# FIXME set this only where it's needed, not globally?
 CFLAGS += @CFLAGS@
 CLDFLAGS += @CLDFLAGS@
 ELDFLAGS += @ELDFLAGS@
 LDDEPS += @LDDEPS@
 LDFLAGS += @LDFLAGS@
 LIB_SUFFIX = @LIB_SUFFIX@
-LVMINTERNAL_LIBS = -llvm-internal $(DAEMON_LIBS) $(UDEV_LIBS) $(DL_LIBS)
+LVMINTERNAL_LIBS = -llvm-internal $(DAEMON_LIBS) $(UDEV_LIBS) $(DL_LIBS) $(BLKID_LIBS)
 DL_LIBS = @DL_LIBS@
 PTHREAD_LIBS = @PTHREAD_LIBS@
 READLINE_LIBS = @READLINE_LIBS@
 SELINUX_LIBS = @SELINUX_LIBS@
+UDEV_CFLAGS = @UDEV_CFLAGS@
 UDEV_LIBS = @UDEV_LIBS@
+BLKID_CFLAGS = @BLKID_CFLAGS@
+BLKID_LIBS = @BLKID_LIBS@
 TESTING = @TESTING@
 
 # Setup directory variables
@@ -52,6 +68,7 @@ prefix = @prefix@
 exec_prefix = @exec_prefix@
 udev_prefix = @udev_prefix@
 sysconfdir = @sysconfdir@
+rootdir = $(DESTDIR)/
 bindir = $(DESTDIR)@bindir@
 confdir = $(DESTDIR)@CONFDIR@/lvm
 includedir = $(DESTDIR)@includedir@
@@ -67,19 +84,25 @@ staticdir = $(DESTDIR)@STATICDIR@
 udevdir = $(DESTDIR)@udevdir@
 pkgconfigdir = $(usrlibdir)/pkgconfig
 initdir = $(DESTDIR)$(sysconfdir)/rc.d/init.d
-systemd_dir = $(DESTDIR)@systemdsystemunitdir@
+systemd_unit_dir = $(DESTDIR)@systemdsystemunitdir@
+systemd_generator_dir = $(DESTDIR)$(SYSTEMD_GENERATOR_DIR)
+systemd_dir = $(DESTDIR)@systemdutildir@
 tmpfiles_dir = $(DESTDIR)@tmpfilesdir@
 ocf_scriptdir = $(DESTDIR)@OCFDIR@
+pyexecdir = $(DESTDIR)$(prefix)
 
 USRLIB_RELPATH = $(shell echo $(abspath $(usrlibdir) $(libdir)) | \
   $(AWK) -f $(top_srcdir)/scripts/relpath.awk)
 
+SYSTEMD_GENERATOR_DIR = @systemdutildir@/system-generators
 DEFAULT_SYS_DIR = @DEFAULT_SYS_DIR@
 DEFAULT_ARCHIVE_DIR = $(DEFAULT_SYS_DIR)/@DEFAULT_ARCHIVE_SUBDIR@
 DEFAULT_BACKUP_DIR = $(DEFAULT_SYS_DIR)/@DEFAULT_BACKUP_SUBDIR@
 DEFAULT_CACHE_DIR = $(DEFAULT_SYS_DIR)/@DEFAULT_CACHE_SUBDIR@
+DEFAULT_PROFILE_DIR = $(DEFAULT_SYS_DIR)/@DEFAULT_PROFILE_SUBDIR@
 DEFAULT_LOCK_DIR = @DEFAULT_LOCK_DIR@
 DEFAULT_RUN_DIR = @DEFAULT_RUN_DIR@
+DEFAULT_MANGLING = @MANGLING@
 
 # Setup vpath search paths for some suffixes
 vpath %.c $(srcdir)
@@ -118,9 +141,32 @@ INSTALL_SCRIPT = $(INSTALL) -p $(M_INSTALL_PROGRAM)
 WFLAGS += -Wall -Wundef -Wshadow -Wcast-align -Wwrite-strings \
  -Wmissing-prototypes -Wmissing-declarations -Wnested-externs \
  -Winline -Wmissing-noreturn -Wformat-security -Wredundant-decls \
- -Wpointer-arith
+ -Wpointer-arith -Wuninitialized -Wmissing-include-dirs \
+ -Wfloat-equal -Wstrict-prototypes \
+ -Wold-style-definition -Wmissing-format-attribute
 
-#WFLAGS += -W -Wconversion -Wbad-function-cast -Wcast-qual
+ifeq ("@HAVE_WJUMP@", "yes")
+WFLAGS += -Wjump-misses-init
+endif
+
+ifeq ("@HAVE_WCLOBBERED@", "yes")
+WFLAGS += -Wclobbered -Wempty-body -Wignored-qualifiers \
+ -Wmissing-parameter-type -Wold-style-declaration -Woverride-init \
+ -Wtype-limits -Wsync-nand -Wlogical-op
+endif
+
+ifneq ("@STATIC_LINK@", "yes")
+ifeq ("@HAVE_PIE@", "yes")
+ifeq ("@HAVE_FULL_RELRO@", "yes")
+  EXTRA_EXEC_CFLAGS += -fPIE -DPIE
+  EXTRA_EXEC_LDFLAGS += -Wl,-z,relro,-z,now -pie
+endif
+endif
+endif
+
+#WFLAGS += -W -Wno-sign-compare -Wno-unused-parameter -Wno-missing-field-initializers
+#WFLAGS += -Wsign-compare -Wunused-parameter -Wmissing-field-initializers 
+#WFLAGS += -Wconversion -Wbad-function-cast -Wcast-qual -Waggregate-return -Wpacked
 #WFLAGS += -pedantic -std=gnu99
 #DEFS += -DDEBUG_CRC32
 
@@ -143,11 +189,9 @@ endif
 LDFLAGS += -L$(top_builddir)/libdm -L$(top_builddir)/lib
 CLDFLAGS += -L$(top_builddir)/libdm -L$(top_builddir)/lib
 
-ifeq ("@BUILD_LVMETAD@", "yes")
-  DAEMON_LIBS = -ldaemonclient
-  LDFLAGS += -L$(top_builddir)/libdaemon/client
-  CLDFLAGS += -L$(top_builddir)/libdaemon/client
-endif
+DAEMON_LIBS = -ldaemonclient
+LDFLAGS += -L$(top_builddir)/libdaemon/client
+CLDFLAGS += -L$(top_builddir)/libdaemon/client
 
 ifeq ("@DMEVENTD@", "yes")
   LDFLAGS += -L$(top_builddir)/daemons/dmeventd
@@ -196,7 +240,8 @@ POTFILES = $(SOURCES:%.c=%.pot)
 .PHONY: all pofile distclean clean cleandir cflow device-mapper
 .PHONY: install install_cluster install_device-mapper install_lvm2
 .PHONY: install_lib_shared install_dm_plugin install_lvm2_plugin
-.PHONY: install_ocf
+.PHONY: install_ocf help
+.PHONY: python_bindings install_python_bindings
 .PHONY: $(SUBDIRS) $(SUBDIRS.install) $(SUBDIRS.clean) $(SUBDIRS.distclean)
 .PHONY: $(SUBDIRS.pofile) $(SUBDIRS.install_cluster) $(SUBDIRS.cflow)
 .PHONY: $(SUBDIRS.device-mapper) $(SUBDIRS.install-device-mapper)
@@ -314,10 +359,10 @@ endif
 $(TARGETS): $(OBJECTS)
 
 %.o: %.c
-	$(CC) -c $(INCLUDES) $(DEFS) $(WFLAGS) $(CFLAGS) $< -o $@
+	$(CC) -c $(INCLUDES) $(DEFS) $(WFLAGS) $(CFLAGS) $(CFLAGS_$@) $< -o $@
 
 %.pot: %.c Makefile
-	$(CC) -E $(INCLUDES) -include $(top_srcdir)/include/pogen.h \
+	$(CC) -E $(INCLUDES) -include $(top_builddir)/include/pogen.h \
 		$(DEFS) $(WFLAGS) $(CFLAGS) $< > $@
 
 %.so: %.o
@@ -368,6 +413,8 @@ $(LIB_STATIC): $(OBJECTS)
 	DEPS=`echo $(DEPS) | sed -e 's/\\//\\\\\\//g'`; \
 	$(CC) -MM $(INCLUDES) $(DEFS) -o $@ $<; \
 	sed -i "s/\(.*\)\.o[ :]*/$$FILE.o $$FILE.d $$FILE.pot: $$DEPS /g" $@; \
+	DEPLIST=`sed 's/ \\\\//;s/.*://;' < $@`; \
+	echo $$DEPLIST | fmt -1 | sed 's/ //g;s/\(.*\)/\1:/' >> $@; \
 	[ -s $@ ] || $(RM) $@
 
 %.mo: %.po
@@ -390,7 +437,7 @@ distclean: cleandir $(SUBDIRS.distclean)
 	( cat $(srcdir)/.exported_symbols; \
 	  if test x$(EXPORTED_HEADER) != x; then \
 		$(CC) -E -P $(INCLUDES) $(DEFS) $(EXPORTED_HEADER) | \
-		$(SED) -ne "/^typedef|}/!s/.*[ \*]\(\$(EXPORTED_FN_PREFIX)_[a-z0-9_]*\)(.*/\1/p"; \
+		$(SED) -ne "/^typedef|}/!s/.*[ *]\($(EXPORTED_FN_PREFIX)_[a-z0-9_]*\)(.*/\1/p"; \
 	  fi \
 	) > $@
 
@@ -399,7 +446,8 @@ distclean: cleandir $(SUBDIRS.distclean)
 		 sed "s/^/		/;s/$$/;/" < $<; \
 		 echo "	local:"; echo "		*;"; echo "};") > $@
 
-ifeq (,$(findstring $(MAKECMDGOALS),cscope.out cflow clean distclean lcov))
+ifeq (,$(findstring $(MAKECMDGOALS),cscope.out cflow clean distclean lcov \
+ help check check_local check_cluster check_lvmetad))
     ifdef SOURCES
        -include $(SOURCES:.c=.d)
     endif

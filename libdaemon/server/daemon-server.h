@@ -12,8 +12,8 @@
  * Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-#ifndef _LVM_DAEMON_COMMON_SERVER_H
-#define _LVM_DAEMON_COMMON_SERVER_H
+#ifndef _LVM_DAEMON_SERVER_H
+#define _LVM_DAEMON_SERVER_H
 
 #include "daemon-client.h"
 
@@ -26,13 +26,13 @@ typedef struct {
 
 typedef struct {
 	struct dm_config_tree *cft;
-	char *buffer;
+	struct buffer buffer;
 } request;
 
 typedef struct {
 	int error;
 	struct dm_config_tree *cft;
-	char *buffer;
+	struct buffer buffer;
 } response;
 
 struct daemon_state;
@@ -64,6 +64,14 @@ static inline const char *daemon_request_str(request r, const char *path, const 
  */
 typedef response (*handle_request)(struct daemon_state s, client_handle h, request r);
 
+typedef struct {
+	uint32_t log_config[32];
+	void *backend_state[32];
+	const char *name;
+} log_state;
+
+struct thread_state;
+
 typedef struct daemon_state {
 	/*
 	 * The maximal stack size for individual daemon threads. This is
@@ -81,7 +89,6 @@ typedef struct daemon_state {
 	const char *protocol;
 	int protocol_version;
 
-	int log_level;
 	handle_request handler;
 	int (*daemon_init)(struct daemon_state *st);
 	int (*daemon_fini)(struct daemon_state *st);
@@ -89,8 +96,17 @@ typedef struct daemon_state {
 	/* Global runtime info maintained by the framework. */
 	int socket_fd;
 
+	log_state *log;
+	struct thread_state *threads;
 	void *private; /* the global daemon state */
 } daemon_state;
+
+typedef struct thread_state {
+	daemon_state s;
+	client_handle client;
+	struct thread_state *next;
+	volatile int active;
+} thread_state;
 
 /*
  * Start serving the requests. This does all the daemonisation, socket setup
@@ -118,5 +134,36 @@ daemon_reply daemon_takeover(daemon_info i, daemon_request r);
 
 /* Call this to request a clean shutdown of the daemon. Async safe. */
 void daemon_stop(void);
+
+enum { DAEMON_LOG_OUTLET_SYSLOG = 1,
+       DAEMON_LOG_OUTLET_STDERR = 2,
+       DAEMON_LOG_OUTLET_SOCKET = 4 };
+
+/* Log a message of a given type. */
+void daemon_log(log_state *s, int type, const char *message);
+
+/* Log a config (sub)tree, using a given message type, each line prefixed with "prefix". */
+void daemon_log_cft(log_state *s, int type, const char *prefix,
+                    const struct dm_config_node *n);
+
+/* Log a multi-line block, prefixing each line with "prefix". */
+void daemon_log_multi(log_state *s, int type, const char *prefix, const char *message);
+
+/* Log a formatted message as "type". See also daemon-log.h. */
+void daemon_logf(log_state *s, int type, const char *format, ...)
+	__attribute__ ((format(printf, 3, 4)));
+
+/*
+ * Configure log_state to send messages of type "type" to the log outlet
+ * "outlet", iff "enable" is true.
+ */
+void daemon_log_enable(log_state *s, int outlet, int type, int enable);
+
+/*
+ * Set up logging on a given outlet using a list of message types (comma
+ * separated) to log using that outlet. The list is expected to look like this,
+ * "all,wire,debug". Returns 0 upon encountering an unknown message type.
+ */
+int daemon_log_parse(log_state *s, int outlet, const char *types, int enable);
 
 #endif

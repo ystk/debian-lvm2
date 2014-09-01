@@ -14,13 +14,13 @@
  */
 
 #include "lib.h"
-#include "dev-cache.h"
-#include "lvm-types.h"
 #include "btree.h"
-#include "filter.h"
-#include "filter-persistent.h"
+#include "config.h"
 #include "toolcontext.h"
 
+#ifdef UDEV_SYNC_SUPPORT
+#include <libudev.h>
+#endif
 #include <unistd.h>
 #include <sys/param.h>
 #include <dirent.h>
@@ -52,11 +52,13 @@ static struct {
 #define _free(x) dm_pool_free(_cache.mem, (x))
 #define _strdup(x) dm_pool_strdup(_cache.mem, (x))
 
-static int _insert(const char *path, int rec, int check_with_udev_db);
+static int _insert(const char *path, const struct stat *info,
+		   int rec, int check_with_udev_db);
 
 /* Setup non-zero members of passed zeroed 'struct device' */
 static void _dev_init(struct device *dev, int max_error_count)
 {
+	dev->phys_block_size = -1;
 	dev->block_size = -1;
 	dev->fd = -1;
 	dev->read_ahead = -1;
@@ -67,7 +69,7 @@ static void _dev_init(struct device *dev, int max_error_count)
 }
 
 struct device *dev_create_file(const char *filename, struct device *dev,
-			       struct str_list *alias, int use_malloc)
+			       struct dm_str_list *alias, int use_malloc)
 {
 	int allocate = !dev;
 
@@ -78,7 +80,7 @@ struct device *dev_create_file(const char *filename, struct device *dev,
 				return NULL;
 			}
 			if (!(alias = dm_zalloc(sizeof(*alias)))) {
-				log_error("struct str_list allocation failed");
+				log_error("struct dm_str_list allocation failed");
 				dm_free(dev);
 				return NULL;
 			}
@@ -94,7 +96,7 @@ struct device *dev_create_file(const char *filename, struct device *dev,
 				return NULL;
 			}
 			if (!(alias = _zalloc(sizeof(*alias)))) {
-				log_error("struct str_list allocation failed");
+				log_error("struct dm_str_list allocation failed");
 				_free(dev);
 				return NULL;
 			}
@@ -130,7 +132,7 @@ static struct device *_dev_create(dev_t d)
 	return dev;
 }
 
-void dev_set_preferred_name(struct str_list *sl, struct device *dev)
+void dev_set_preferred_name(struct dm_str_list *sl, struct device *dev)
 {
 	/*
 	 * Don't interfere with ordering specified in config file.
@@ -138,7 +140,7 @@ void dev_set_preferred_name(struct str_list *sl, struct device *dev)
 	if (_cache.preferred_names_matcher)
 		return;
 
-	log_debug("%s: New preferred name", sl->str);
+	log_debug_devs("%s: New preferred name", sl->str);
 	dm_list_del(&sl->list);
 	dm_list_add_h(&dev->aliases, &sl->list);
 }
@@ -305,8 +307,8 @@ static int _compare_paths(const char *path0, const char *path1)
 
 static int _add_alias(struct device *dev, const char *path)
 {
-	struct str_list *sl = _zalloc(sizeof(*sl));
-	struct str_list *strl;
+	struct dm_str_list *sl = _zalloc(sizeof(*sl));
+	struct dm_str_list *strl;
 	const char *oldpath;
 	int prefer_old = 1;
 
@@ -316,7 +318,7 @@ static int _add_alias(struct device *dev, const char *path)
 	/* Is name already there? */
 	dm_list_iterate_items(strl, &dev->aliases) {
 		if (!strcmp(strl->str, path)) {
-			log_debug("%s: Already in device cache", path);
+			log_debug_devs("%s: Already in device cache", path);
 			return 1;
 		}
 	}
@@ -324,13 +326,13 @@ static int _add_alias(struct device *dev, const char *path)
 	sl->str = path;
 
 	if (!dm_list_empty(&dev->aliases)) {
-		oldpath = dm_list_item(dev->aliases.n, struct str_list)->str;
+		oldpath = dm_list_item(dev->aliases.n, struct dm_str_list)->str;
 		prefer_old = _compare_paths(path, oldpath);
-		log_debug("%s: Aliased to %s in device cache%s",
-			  path, oldpath, prefer_old ? "" : " (preferred name)");
+		log_debug_devs("%s: Aliased to %s in device cache%s",
+			       path, oldpath, prefer_old ? "" : " (preferred name)");
 
 	} else
-		log_debug("%s: Added to device cache", path);
+		log_debug_devs("%s: Added to device cache", path);
 
 	if (prefer_old)
 		dm_list_add(&dev->aliases, &sl->list);
@@ -444,7 +446,7 @@ static int _insert_dir(const char *dir)
 				return_0;
 
 			_collapse_slashes(path);
-			r &= _insert(path, 1, 0);
+			r &= _insert(path, NULL, 1, 0);
 			dm_free(path);
 
 			free(dirent[n]);
@@ -465,7 +467,7 @@ static int _insert_file(const char *path)
 	}
 
 	if (!S_ISREG(info.st_mode)) {
-		log_debug("%s: Not a regular file", path);
+		log_debug_devs("%s: Not a regular file", path);
 		return 0;
 	}
 
@@ -497,7 +499,7 @@ static int _insert_udev_dir(struct udev *udev, const char *dir)
 {
 	struct udev_enumerate *udev_enum = NULL;
 	struct udev_list_entry *device_entry, *symlink_entry;
-	const char *node_name, *symlink_name;
+	const char *entry_name, *node_name, *symlink_name;
 	struct udev_device *device;
 	int r = 1;
 
@@ -508,22 +510,36 @@ static int _insert_udev_dir(struct udev *udev, const char *dir)
 	    udev_enumerate_scan_devices(udev_enum))
 		goto bad;
 
+	/*
+	 * Report any missing information as "log_very_verbose" only, do not
+	 * report it as a "warning" or "error" - the record could be removed
+	 * by the time we ask for more info (node name, symlink name...).
+	 * Whatever removes *any* block device in the system (even unrelated
+	 * to our operation), we would have a warning/error on output then.
+	 * That could be misleading. If there's really any problem with missing
+	 * information from udev db, we can still have a look at the verbose log.
+	 */
 	udev_list_entry_foreach(device_entry, udev_enumerate_get_list_entry(udev_enum)) {
-		if (!(device = udev_device_new_from_syspath(udev, udev_list_entry_get_name(device_entry)))) {
-			log_warn("WARNING: udev failed to return a device entry.");
+		entry_name = udev_list_entry_get_name(device_entry);
+
+		if (!(device = udev_device_new_from_syspath(udev, entry_name))) {
+			log_very_verbose("udev failed to return a device for entry %s.",
+					 entry_name);
 			continue;
 		}
 
 		if (!(node_name = udev_device_get_devnode(device)))
-			log_warn("WARNING: udev failed to return a device node.");
+			log_very_verbose("udev failed to return a device node for entry %s.",
+					 entry_name);
 		else
-			r &= _insert(node_name, 0, 0);
+			r &= _insert(node_name, NULL, 0, 0);
 
 		udev_list_entry_foreach(symlink_entry, udev_device_get_devlinks_list_entry(device)) {
 			if (!(symlink_name = udev_list_entry_get_name(symlink_entry)))
-				log_warn("WARNING: udev failed to return a symlink name.");
+				log_very_verbose("udev failed to return a symlink name for entry %s.",
+						 entry_name);
 			else
-				r &= _insert(symlink_name, 0, 0);
+				r &= _insert(symlink_name, NULL, 0, 0);
 		}
 
 		udev_device_unref(device);
@@ -550,13 +566,13 @@ static void _insert_dirs(struct dm_list *dirs)
 	dm_list_iterate_items(dl, &_cache.dirs) {
 		if (with_udev) {
 			if (!_insert_udev_dir(udev, dl->dir))
-				log_debug("%s: Failed to insert devices from "
-					  "udev-managed directory to device "
-					  "cache fully", dl->dir);
+				log_debug_devs("%s: Failed to insert devices from "
+					       "udev-managed directory to device "
+					       "cache fully", dl->dir);
 		}
 		else if (!_insert_dir(dl->dir))
-			log_debug("%s: Failed to insert devices to "
-				  "device cache fully", dl->dir);
+			log_debug_devs("%s: Failed to insert devices to "
+				       "device cache fully", dl->dir);
 	}
 }
 
@@ -577,49 +593,49 @@ static void _insert_dirs(struct dm_list *dirs)
 
 #endif	/* UDEV_SYNC_SUPPORT */
 
-static int _insert(const char *path, int rec, int check_with_udev_db)
+static int _insert(const char *path, const struct stat *info,
+		   int rec, int check_with_udev_db)
 {
-	struct stat info;
-	int r = 0;
+	struct stat tinfo;
 
-	if (stat(path, &info) < 0) {
-		log_sys_very_verbose("stat", path);
-		return 0;
+	if (!info) {
+		if (stat(path, &tinfo) < 0) {
+			log_sys_very_verbose("stat", path);
+			return 0;
+		}
+		info = &tinfo;
 	}
 
-	if (check_with_udev_db && !_device_in_udev_db(info.st_rdev)) {
+	if (check_with_udev_db && !_device_in_udev_db(info->st_rdev)) {
 		log_very_verbose("%s: Not in udev db", path);
 		return 0;
 	}
 
-	if (S_ISDIR(info.st_mode)) {	/* add a directory */
+	if (S_ISDIR(info->st_mode)) {	/* add a directory */
 		/* check it's not a symbolic link */
-		if (lstat(path, &info) < 0) {
+		if (lstat(path, &tinfo) < 0) {
 			log_sys_very_verbose("lstat", path);
 			return 0;
 		}
 
-		if (S_ISLNK(info.st_mode)) {
-			log_debug("%s: Symbolic link to directory", path);
-			return 0;
+		if (S_ISLNK(tinfo.st_mode)) {
+			log_debug_devs("%s: Symbolic link to directory", path);
+			return 1;
 		}
 
-		if (rec)
-			r = _insert_dir(path);
-
-	} else {		/* add a device */
-		if (!S_ISBLK(info.st_mode)) {
-			log_debug("%s: Not a block device", path);
-			return 0;
-		}
-
-		if (!_insert_dev(path, info.st_rdev))
+		if (rec && !_insert_dir(path))
 			return_0;
+	} else {		/* add a device */
+		if (!S_ISBLK(info->st_mode)) {
+			log_debug_devs("%s: Not a block device", path);
+			return 1;
+		}
 
-		r = 1;
+		if (!_insert_dev(path, info->st_rdev))
+			return_0;
 	}
 
-	return r;
+	return 1;
 }
 
 static void _full_scan(int dev_scan)
@@ -662,7 +678,7 @@ static int _init_preferred_names(struct cmd_context *cmd)
 
 	_cache.preferred_names_matcher = NULL;
 
-	if (!(cn = find_config_tree_node(cmd, "devices/preferred_names")) ||
+	if (!(cn = find_config_tree_node(cmd, devices_preferred_names_CFG, NULL)) ||
 	    cn->v->type == DM_CFG_EMPTY_ARRAY) {
 		log_very_verbose("devices/preferred_names not found in config file: "
 				 "using built-in preferences");
@@ -746,21 +762,44 @@ int dev_cache_init(struct cmd_context *cmd)
 	return 0;
 }
 
-static void _check_closed(struct device *dev)
+/*
+ * Returns number of devices still open.
+ */
+static int _check_for_open_devices(int close_immediate)
 {
-	if (dev->fd >= 0)
-		log_error("Device '%s' has been left open.", dev_name(dev));
+	struct device *dev;
+	struct dm_hash_node *n;
+	int num_open = 0;
+
+	dm_hash_iterate(n, _cache.names) {
+		dev = (struct device *) dm_hash_get_data(_cache.names, n);
+		if (dev->fd >= 0) {
+			log_error("Device '%s' has been left open (%d remaining references).",
+				  dev_name(dev), dev->open_count);
+			num_open++;
+			if (close_immediate)
+				dev_close_immediate(dev);
+		}
+	}
+
+	return num_open;
 }
 
-static void _check_for_open_devices(void)
+/*
+ * Returns number of devices left open.
+ */
+int dev_cache_check_for_open_devices(void)
 {
-	dm_hash_iter(_cache.names, (dm_hash_iterate_fn) _check_closed);
+	return _check_for_open_devices(0);
 }
 
-void dev_cache_exit(void)
+int dev_cache_exit(void)
 {
+	int num_open = 0;
+
 	if (_cache.names)
-		_check_for_open_devices();
+		if ((num_open = _check_for_open_devices(1)) > 0)
+			log_error(INTERNAL_ERROR "%d device(s) were left open and have been closed.", num_open);
 
 	if (_cache.preferred_names_matcher)
 		_cache.preferred_names_matcher = NULL;
@@ -779,6 +818,8 @@ void dev_cache_exit(void)
 	_cache.has_scanned = 0;
 	dm_list_init(&_cache.dirs);
 	dm_list_init(&_cache.files);
+
+	return (!num_open);
 }
 
 int dev_cache_add_dir(const char *path)
@@ -787,13 +828,13 @@ int dev_cache_add_dir(const char *path)
 	struct stat st;
 
 	if (stat(path, &st)) {
-		log_error("Ignoring %s: %s", path, strerror(errno));
+		log_warn("Ignoring %s: %s.", path, strerror(errno));
 		/* But don't fail */
 		return 1;
 	}
 
 	if (!S_ISDIR(st.st_mode)) {
-		log_error("Ignoring %s: Not a directory", path);
+		log_warn("Ignoring %s: Not a directory.", path);
 		return 1;
 	}
 
@@ -813,13 +854,13 @@ int dev_cache_add_loopfile(const char *path)
 	struct stat st;
 
 	if (stat(path, &st)) {
-		log_error("Ignoring %s: %s", path, strerror(errno));
+		log_warn("Ignoring %s: %s.", path, strerror(errno));
 		/* But don't fail */
 		return 1;
 	}
 
 	if (!S_ISREG(st.st_mode)) {
-		log_error("Ignoring %s: Not a regular file", path);
+		log_warn("Ignoring %s: Not a regular file.", path);
 		return 1;
 	}
 
@@ -847,7 +888,7 @@ const char *dev_name_confirmed(struct device *dev, int quiet)
 		return dev_name(dev);
 
 	while ((r = stat(name = dm_list_item(dev->aliases.n,
-					  struct str_list)->str, &buf)) ||
+					  struct dm_str_list)->str, &buf)) ||
 	       (buf.st_rdev != dev->dev)) {
 		if (r < 0) {
 			if (quiet)
@@ -856,13 +897,13 @@ const char *dev_name_confirmed(struct device *dev, int quiet)
 				log_sys_error("stat", name);
 		}
 		if (quiet)
-			log_debug("Path %s no longer valid for device(%d,%d)",
-				  name, (int) MAJOR(dev->dev),
-				  (int) MINOR(dev->dev));
+			log_debug_devs("Path %s no longer valid for device(%d,%d)",
+				       name, (int) MAJOR(dev->dev),
+				       (int) MINOR(dev->dev));
 		else
-			log_error("Path %s no longer valid for device(%d,%d)",
-				  name, (int) MAJOR(dev->dev),
-				  (int) MINOR(dev->dev));
+			log_warn("Path %s no longer valid for device(%d,%d)",
+				 name, (int) MAJOR(dev->dev),
+				 (int) MINOR(dev->dev));
 
 		/* Remove the incorrect hash entry */
 		dm_hash_remove(_cache.names, name);
@@ -873,13 +914,13 @@ const char *dev_name_confirmed(struct device *dev, int quiet)
 		if (dm_list_size(&dev->aliases) > 1) {
 			dm_list_del(dev->aliases.n);
 			if (!r)
-				_insert(name, 0, obtain_device_list_from_udev());
+				_insert(name, &buf, 0, obtain_device_list_from_udev());
 			continue;
 		}
 
 		/* Scanning issues this inappropriately sometimes. */
-		log_debug("Aborting - please provide new pathname for what "
-			  "used to be %s", name);
+		log_debug_devs("Aborting - please provide new pathname for what "
+			       "used to be %s", name);
 		return NULL;
 	}
 
@@ -895,13 +936,20 @@ struct device *dev_cache_get(const char *name, struct dev_filter *f)
 		return d;
 
 	/* If the entry's wrong, remove it */
-	if (d && (stat(name, &buf) || (buf.st_rdev != d->dev))) {
+	if (stat(name, &buf) < 0) {
+		if (d)
+			dm_hash_remove(_cache.names, name);
+		log_sys_very_verbose("stat", name);
+		return NULL;
+	}
+
+	if (d && (buf.st_rdev != d->dev)) {
 		dm_hash_remove(_cache.names, name);
 		d = NULL;
 	}
 
 	if (!d) {
-		_insert(name, 0, obtain_device_list_from_udev());
+		_insert(name, &buf, 0, obtain_device_list_from_udev());
 		d = (struct device *) dm_hash_lookup(_cache.names, name);
 		if (!d) {
 			_full_scan(0);
@@ -909,8 +957,11 @@ struct device *dev_cache_get(const char *name, struct dev_filter *f)
 		}
 	}
 
-	return (d && (!f || (d->flags & DEV_REGULAR) ||
-		      f->passes_filter(f, d))) ? d : NULL;
+	if (!d || (f && !(d->flags & DEV_REGULAR) && !(f->passes_filter(f, d))))
+		return NULL;
+
+	log_debug_devs("Using %s", dev_name(d));
+	return d;
 }
 
 static struct device *_dev_cache_seek_devt(dev_t dev)
@@ -957,21 +1008,27 @@ struct dev_iter *dev_iter_create(struct dev_filter *f, int dev_scan)
 
 	if (dev_scan && !trust_cache()) {
 		/* Flag gets reset between each command */
-		if (!full_scan_done())
-			persistent_filter_wipe(f); /* Calls _full_scan(1) */
+		if (!full_scan_done()) {
+			if (f && f->wipe)
+				f->wipe(f); /* Calls _full_scan(1) */
+			else
+				_full_scan(1);
+		}
 	} else
 		_full_scan(0);
 
 	di->current = btree_first(_cache.devices);
 	di->filter = f;
-	di->filter->use_count++;
+	if (di->filter)
+		di->filter->use_count++;
 
 	return di;
 }
 
 void dev_iter_destroy(struct dev_iter *iter)
 {
-	iter->filter->use_count--;
+	if (iter->filter)
+		iter->filter->use_count--;
 	dm_free(iter);
 }
 
@@ -987,8 +1044,10 @@ struct device *dev_iter_get(struct dev_iter *iter)
 	while (iter->current) {
 		struct device *d = _iter_next(iter);
 		if (!iter->filter || (d->flags & DEV_REGULAR) ||
-		    iter->filter->passes_filter(iter->filter, d))
+		    iter->filter->passes_filter(iter->filter, d)) {
+			log_debug_devs("Using %s", dev_name(d));
 			return d;
+		}
 	}
 
 	return NULL;
@@ -1013,6 +1072,6 @@ int dev_fd(struct device *dev)
 
 const char *dev_name(const struct device *dev)
 {
-	return (dev) ? dm_list_item(dev->aliases.n, struct str_list)->str :
+	return (dev && dev->aliases.n) ? dm_list_item(dev->aliases.n, struct dm_str_list)->str :
 	    "unknown device";
 }

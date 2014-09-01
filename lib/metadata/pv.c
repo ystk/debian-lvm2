@@ -69,7 +69,8 @@ struct device *pv_dev(const struct physical_volume *pv)
 
 const char *pv_vg_name(const struct physical_volume *pv)
 {
-	return pv_field(pv, vg_name);
+	/* Avoid exposing internal orphan names to users */
+	return (!is_orphan(pv)) ? pv_field(pv, vg_name) : "";
 }
 
 const char *pv_dev_name(const struct physical_volume *pv)
@@ -88,6 +89,7 @@ uint64_t pv_dev_size(const struct physical_volume *pv)
 
 	if (!dev_get_size(pv->dev, &size))
 		size = 0;
+
 	return size;
 }
 
@@ -99,6 +101,7 @@ uint64_t pv_size_field(const struct physical_volume *pv)
 		size = pv->size;
 	else
 		size = (uint64_t) pv->pe_count * pv->pe_size;
+
 	return size;
 }
 
@@ -106,11 +109,12 @@ uint64_t pv_free(const struct physical_volume *pv)
 {
 	uint64_t freespace;
 
-	if (!pv->pe_count)
+	if (!pv->vg || is_orphan_vg(pv->vg->name))
 		freespace = pv->size;
 	else
 		freespace = (uint64_t)
 			(pv->pe_count - pv->pe_alloc_count) * pv->pe_size;
+
 	return freespace;
 }
 
@@ -122,6 +126,16 @@ uint64_t pv_status(const struct physical_volume *pv)
 uint32_t pv_pe_size(const struct physical_volume *pv)
 {
 	return pv_field(pv, pe_size);
+}
+
+uint64_t pv_ba_start(const struct physical_volume *pv)
+{
+	return pv_field(pv, ba_start);
+}
+
+uint64_t pv_ba_size(const struct physical_volume *pv)
+{
+	return pv_field(pv, ba_size);
 }
 
 uint64_t pv_pe_start(const struct physical_volume *pv)
@@ -144,14 +158,17 @@ uint32_t pv_mda_count(const struct physical_volume *pv)
 	struct lvmcache_info *info;
 
 	info = lvmcache_info_from_pvid((const char *)&pv->id.uuid, 0);
+
 	return info ? lvmcache_mda_count(info) : UINT64_C(0);
 }
 
 static int _count_unignored(struct metadata_area *mda, void *baton)
 {
 	uint32_t *count = baton;
+
 	if (!mda_is_ignored(mda))
 		(*count) ++;
+
 	return 1;
 }
 
@@ -164,6 +181,7 @@ uint32_t pv_mda_used_count(const struct physical_volume *pv)
 	if (!info)
 		return 0;
 	lvmcache_foreach_mda(info, _count_unignored, &used_count);
+
 	return used_count;
 }
 
@@ -218,7 +236,8 @@ uint64_t pv_mda_size(const struct physical_volume *pv)
 	return min_mda_size;
 }
 
-static int _pv_mda_free(struct metadata_area *mda, void *baton) {
+static int _pv_mda_free(struct metadata_area *mda, void *baton)
+{
 	uint64_t mda_free;
 	uint64_t *freespace = baton;
 
@@ -228,22 +247,32 @@ static int _pv_mda_free(struct metadata_area *mda, void *baton) {
 	mda_free = mda->ops->mda_free_sectors(mda);
 	if (mda_free < *freespace)
 		*freespace = mda_free;
+
 	return 1;
 }
 
-uint64_t pv_mda_free(const struct physical_volume *pv)
+uint64_t lvmcache_info_mda_free(struct lvmcache_info *info)
 {
-	struct lvmcache_info *info;
 	uint64_t freespace = UINT64_MAX;
-	const char *pvid = (const char *)&pv->id.uuid;
 
-	if ((info = lvmcache_info_from_pvid(pvid, 0)))
+	if (info)
 		lvmcache_foreach_mda(info, _pv_mda_free, &freespace);
 
 	if (freespace == UINT64_MAX)
 		freespace = UINT64_C(0);
 
 	return freespace;
+}
+
+uint64_t pv_mda_free(const struct physical_volume *pv)
+{
+	const char *pvid = (const char *)&pv->id.uuid;
+	struct lvmcache_info *info;
+
+	if ((info = lvmcache_info_from_pvid(pvid, 0)))
+		return lvmcache_info_mda_free(info);
+
+	return 0;
 }
 
 uint64_t pv_used(const struct physical_volume *pv)
@@ -254,6 +283,7 @@ uint64_t pv_used(const struct physical_volume *pv)
 		used = 0LL;
 	else
 		used = (uint64_t) pv->pe_alloc_count * pv->pe_size;
+
 	return used;
 }
 
@@ -282,6 +312,7 @@ static int _pv_mda_set_ignored_one(struct metadata_area *mda, void *baton)
 			mda_set_ignored(vg_mda, b->mda_ignored);
 
 	mda_set_ignored(mda, b->mda_ignored);
+
 	return 1;
 }
 
@@ -334,3 +365,18 @@ unsigned pv_mda_set_ignored(const struct physical_volume *pv, unsigned mda_ignor
 	return 1;
 }
 
+struct label *pv_label(const struct physical_volume *pv)
+{
+	struct lvmcache_info *info =
+		lvmcache_info_from_pvid((const char *)&pv->id.uuid, 0);
+
+	if (info)
+		return lvmcache_get_label(info);
+
+	/* process_each_pv() may create dummy PVs that have no label */
+	if (pv->vg && pv->dev)
+		log_error(INTERNAL_ERROR "PV %s unexpectedly not in cache.",
+			  dev_name(pv->dev));
+
+	return NULL;
+}
