@@ -1,3 +1,4 @@
+#!/bin/sh
 # Copyright (C) 2009-2011 Red Hat, Inc. All rights reserved.
 #
 # This copyrighted material is made available to anyone wishing to use,
@@ -8,7 +9,7 @@
 # along with this program; if not, write to the Free Software Foundation,
 # Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
-. lib/test
+. lib/inittest
 
 lvm version
 
@@ -25,4 +26,4 @@ aux prepare_devs 5
 
 # ensure we do not crash on a bug in config file
 aux lvmconf 'log/prefix = 1""'
-not lvs
+not lvs $(cat DEVICES)

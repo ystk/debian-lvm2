@@ -17,21 +17,11 @@ SCRIPTNAME=/etc/init.d/lvm2
 
 [ -x /sbin/vgchange ] || exit 0
 
-do_start()
-{
-	modprobe dm-mod 2>/dev/null || :
-	/sbin/vgscan --ignorelockingfailure >/dev/null || :
-	/sbin/vgchange -aly --ignorelockingfailure >/dev/null || return 2
-}
-
 case "$1" in
   start)
 	log_action_begin_msg "Setting up LVM Volume Groups"
-	do_start
-	case "$?" in
-		0|1) log_action_end_msg 0 ;;
-		2) log_action_end_msg 1 ;;
-	esac
+	/sbin/lvm vgchange -aay --sysinit >/dev/null
+	log_action_end_msg "$?"
 	;;
   stop|restart|force-reload|status)
 	;;

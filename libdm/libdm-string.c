@@ -15,6 +15,9 @@
 #include "dmlib.h"
 
 #include <ctype.h>
+#include <stdarg.h>
+#include <math.h>  /* fabs() */
+#include <float.h> /* DBL_EPSILON */
 
 /*
  * consume characters while they match the predicate function.
@@ -92,7 +95,10 @@ static char *_unquote(char *component)
 int dm_split_lvm_name(struct dm_pool *mem, const char *dmname,
 		      char **vgname, char **lvname, char **layer)
 {
-	if (mem && !(*vgname = dm_pool_strdup(mem, dmname)))
+	if (mem)
+		*vgname = dm_pool_strdup(mem, dmname);
+
+	if (!*vgname)
 		return 0;
 
 	_unquote(*layer = _unquote(*lvname = _unquote(*vgname)));
@@ -116,7 +122,7 @@ int dm_snprintf(char *buf, size_t bufsize, const char *format, ...)
 	n = vsnprintf(buf, bufsize, format, ap);
 	va_end(ap);
 
-	if (n < 0 || ((unsigned) n + 1 > bufsize))
+	if (n < 0 || ((unsigned) n >= bufsize))
 		return -1;
 
 	return n;
@@ -129,7 +135,7 @@ const char *dm_basename(const char *path)
 	return p ? p + 1 : path;
 }
 
-int dm_asprintf(char **result, const char *format, ...)
+int dm_vasprintf(char **result, const char *format, va_list aq)
 {
 	int i, n, size = 16;
 	va_list ap;
@@ -141,7 +147,7 @@ int dm_asprintf(char **result, const char *format, ...)
 		return -1;
 
 	for (i = 0;; i++) {
-		va_start(ap, format);
+		va_copy(ap, aq);
 		n = vsnprintf(buf, size, format, ap);
 		va_end(ap);
 
@@ -166,6 +172,16 @@ int dm_asprintf(char **result, const char *format, ...)
 		*result = buf;
 
 	return n + 1;
+}
+
+int dm_asprintf(char **result, const char *format, ...)
+{
+	int r;
+	va_list ap;
+	va_start(ap, format);
+	r = dm_vasprintf(result, format, ap);
+	va_end(ap);
+	return r;
 }
 
 /*
@@ -419,4 +435,108 @@ int dm_strncpy(char *dest, const char *src, size_t n)
 		dest[n - 1] = '\0';
 
 	return 0;
+}
+
+/* Test if the doubles are close enough to be considered equal */
+static int _close_enough(double d1, double d2)
+{
+	return fabs(d1 - d2) < DBL_EPSILON;
+}
+
+uint64_t dm_units_to_factor(const char *units, char *unit_type,
+			    int strict, const char **endptr)
+{
+	char *ptr = NULL;
+	uint64_t v;
+	double custom_value = 0;
+	uint64_t multiplier;
+
+	if (endptr)
+		*endptr = (char *) units;
+
+	if (isdigit(*units)) {
+		custom_value = strtod(units, &ptr);
+		if (ptr == units)
+			return 0;
+		v = (uint64_t) strtoull(units, NULL, 10);
+		if (_close_enough((double) v, custom_value))
+			custom_value = 0;	/* Use integer arithmetic */
+		units = ptr;
+	} else
+		v = 1;
+
+	/* Only one units char permitted in strict mode. */
+	if (strict && units[0] && units[1])
+		return 0;
+
+	if (v == 1)
+		*unit_type = *units;
+	else
+		*unit_type = 'U';
+
+	switch (*units) {
+	case 'h':
+	case 'H':
+		multiplier = v = UINT64_C(1);
+		*unit_type = *units;
+		break;
+	case 'b':
+	case 'B':
+		multiplier = UINT64_C(1);
+		break;
+#define KILO UINT64_C(1024)
+	case 's':
+	case 'S':
+		multiplier = (KILO/2);
+		break;
+	case 'k':
+		multiplier = KILO;
+		break;
+	case 'm':
+		multiplier = KILO * KILO;
+		break;
+	case 'g':
+		multiplier = KILO * KILO * KILO;
+		break;
+	case 't':
+		multiplier = KILO * KILO * KILO * KILO;
+		break;
+	case 'p':
+		multiplier = KILO * KILO * KILO * KILO * KILO;
+		break;
+	case 'e':
+		multiplier = KILO * KILO * KILO * KILO * KILO * KILO;
+		break;
+#undef KILO
+#define KILO UINT64_C(1000)
+	case 'K':
+		multiplier = KILO;
+		break;
+	case 'M':
+		multiplier = KILO * KILO;
+		break;
+	case 'G':
+		multiplier = KILO * KILO * KILO;
+		break;
+	case 'T':
+		multiplier = KILO * KILO * KILO * KILO;
+		break;
+	case 'P':
+		multiplier = KILO * KILO * KILO * KILO * KILO;
+		break;
+	case 'E':
+		multiplier = KILO * KILO * KILO * KILO * KILO * KILO;
+		break;
+#undef KILO
+	default:
+		return 0;
+	}
+
+	if (endptr)
+		*endptr = (char *) units + 1;
+
+	if (_close_enough(custom_value, 0.))
+		return v * multiplier; /* Use integer arithmetic */
+	else
+		return (uint64_t) (custom_value * multiplier);
 }

@@ -30,12 +30,17 @@ DD=dd
 CUT=cut
 DATE=date
 BASENAME=basename
+UDEVADM=udevadm
 UNAME=uname
+TR=tr
+SOCAT=socat # either socat or nc is needed for dumping lvmetad state
+NC=nc
 
 # user may override lvm and dmsetup location by setting LVM_BINARY
 # and DMSETUP_BINARY respectively
 LVM=${LVM_BINARY-lvm}
 DMSETUP=${DMSETUP_BINARY-dmsetup}
+LVMETAD_SOCKET=${LVM_LVMETAD_SOCKET-/var/run/lvm/lvmetad.socket}
 
 die() {
     code=$1; shift
@@ -51,9 +56,12 @@ function usage {
 	echo "    -h print this message"
 	echo "    -a advanced collection - warning: if lvm is already hung,"
 	echo "       then this script may hang as well if -a is used"
-	echo "    -m gather LVM metadata from the PVs"
-	echo "    -d <directory> dump into a directory instead of tarball"
 	echo "    -c if running clvmd, gather cluster data as well"
+	echo "    -d <directory> dump into a directory instead of tarball"
+	echo "    -l gather lvmetad state if running"
+	echo "    -m gather LVM metadata from the PVs"
+	echo "    -s gather system info and context"
+	echo "    -u gather udev info and context"
 	echo ""
 
 	exit 1
@@ -62,21 +70,25 @@ function usage {
 advanced=0
 clustered=0
 metadata=0
-while getopts :acd:hm opt; do
+sysreport=0
+udev=0
+while getopts :acd:hlmus opt; do
 	case $opt in 
-		s)      sysreport=1 ;;
 		a)	advanced=1 ;;
 		c)	clustered=1 ;;
 		d)	userdir=$OPTARG ;;
 		h)	usage ;;
+		l)	lvmetad=1 ;;
 		m)	metadata=1 ;;
+		s)      sysreport=1 ;;
+		u)	udev=1 ;;
 		:)	echo "$0: $OPTARG requires a value:"; usage ;;
 		\?)     echo "$0: unknown option $OPTARG"; usage ;;
 		*)	usage ;;
 	esac
 done
 
-NOW=`$DATE -u +%G%m%d%k%M%S | /usr/bin/tr -d ' '`
+NOW=`$DATE -u +%G%m%d%k%M%S | $TR -d ' '`
 if test -n "$userdir"; then
 	dir="$userdir"
 else
@@ -194,7 +206,10 @@ myecho "Gathering console messages..."
 log "$TAIL -n 75 /var/log/messages >> \"$dir/messages\" 2>> \"$log\""
 
 myecho "Gathering /etc/lvm info..."
-log "$CP -a /etc/lvm \"$dir/lvm\" 2>> \"$log\""
+log "$LS -laR /etc/lvm >> \"$dir/etc_lvm_listing\" 2>> \"$log\""
+log "$CP -RL --preserve=all /etc/lvm \"$dir/lvm\" 2>> \"$log\""
+log "$LVM dumpconfig --type diff --file \"$dir/config_diff\" 2>> \"$log\""
+log "$LVM dumpconfig --type missing --file \"$dir/config_missing\" 2>> \"$log\""
 
 myecho "Gathering /dev listing..."
 log "$LS -laR /dev >> \"$dir/dev_listing\" 2>> \"$log\""
@@ -219,6 +234,66 @@ if (( $metadata )); then
 		myecho "  $pv"
 		log "$DD if=$pv \"of=$dir/metadata/$name\" bs=512 count=$pe_start 2>> \"$log\""
 	done
+fi
+
+if (( $sysreport )); then
+	myecho "Gathering system info..."
+
+	sysreport_dir="$dir/sysreport"
+	log_lines=10000
+
+	SYSTEMCTL=$(which systemctl 2>> $log)
+	JOURNALCTL=$(which journalctl 2>> $log)
+
+	if test -z "$SYSTEMCTL"; then
+		myecho "WARNING: systemctl not found"
+	elif test -z "$JOURNALCTL"; then
+		myecho "WARNING: journalctl not found"
+	else
+		log "$MKDIR -p \"$sysreport_dir\""
+		log "$JOURNALCTL -b --no-pager -o short-precise > \"$sysreport_dir/journal_content\" 2>> \"$log\""
+		log "$SYSTEMCTL status -l --no-pager -n $log_lines -o short-precise dm-event.socket dm-event.service \
+						   lvm2-monitor.service \
+						   lvm2-lvmetad.socket lvm2-lvmetad.service \
+						   lvm2-cluster-activation.service \
+						   lvm2-clvmd.service \
+						   lvm2-cmirrord.service \
+						   > \"$sysreport_dir/systemd_lvm2_services_status\" 2>> \"$log\""
+		log "$SYSTEMCTL list-units -l -a --no-legend --no-pager > \"$sysreport_dir/systemd_unit_list\" 2>> \"$log\""
+		for unit in $(cat $sysreport_dir/systemd_unit_list | grep lvm2-pvscan | cut -d " " -f 1); do
+			log "$SYSTEMCTL status -l --no-pager -n $log_lines -o short-precise $unit >> \"$sysreport_dir/systemd_lvm2_pvscan_service_status\""
+		done
+	fi
+fi
+
+if (( $udev )); then
+	myecho "Gathering udev info..."
+
+	udev_dir="$dir/udev"
+
+	log "$MKDIR -p \"$udev_dir\""
+	log "$UDEVADM info --version >> \"$udev_dir/version\" 2>> \"$log\""
+	log "$UDEVADM info --export-db >> \"$udev_dir/db\" 2>> \"$log\""
+	log "$CP -a /etc/udev/udev.conf \"$udev_dir/conf\" 2>> \"$log\""
+	log "$LS -la /lib/udev >> \"$udev_dir/lib_dir\" 2>> \"$log\""
+	log "$CP -RL --preserve=all /etc/udev/rules.d \"$udev_dir/rules_etc\" 2>> \"$log\""
+	log "$CP -RL --preserve=all /lib/udev/rules.d \"$udev_dir/rules_lib\" 2>> \"$log\""
+fi
+
+if (( $lvmetad )); then
+    (echo 'request="dump"'; echo '##') | {
+	if type -p $SOCAT >& /dev/null; then
+	    echo "$SOCAT unix-connect:$LVMETAD_SOCKET -" >> "$log"
+	    $SOCAT "unix-connect:$LVMETAD_SOCKET" - 2>> "$log"
+	elif echo | $NC -U "$LVMETAD_SOCKET"; then
+	    echo "$NC -U $LVMETAD_SOCKET" >> "$log"
+	    $NC -U "$LVMETAD_SOCKET" 2>> "$log"
+	else
+	    myecho "WARNING: Neither socat nor nc -U seems to be available." 1>&2
+	    echo "# DUMP FAILED"
+	    return 1
+	fi
+    } > "$dir/lvmetad.txt"
 fi
 
 if test -z "$userdir"; then

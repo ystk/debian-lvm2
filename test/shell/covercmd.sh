@@ -1,4 +1,5 @@
-# Copyright (C) 2008 Red Hat, Inc. All rights reserved.
+#!/bin/sh
+# Copyright (C) 2008-2014 Red Hat, Inc. All rights reserved.
 #
 # This copyrighted material is made available to anyone wishing to use,
 # modify, copy, or redistribute it subject to the terms and conditions
@@ -9,74 +10,68 @@
 # Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 #
-# tests basic functionality of read-ahead and ra regressions
+# tests functionality we don't have in other special test files yet
+# to improve code coverage
 #
 
-. lib/test
+. lib/inittest
 
-TEST_UUID="aaaaaa-aaaa-aaaa-aaaa-aaaa-aaaa-aaaaaa"
+aux prepare_pvs 5
+get_devs
 
-get_lvs_()
-{
-  case $(lvs --units s --nosuffix --noheadings -o $1_read_ahead "$vg"/"$lv") in
-    *$2) true ;;
-    *) false ;;
-  esac
-}
+pvcreate --metadatacopies 0 "$dev2"
+pvcreate --metadatacopies 0 "$dev3"
 
-aux prepare_devs 5
+# FIXME takes very long time
+#pvck "$dev1"
 
-pvcreate $dev1
-pvcreate --metadatacopies 0 $dev2
-pvcreate --metadatacopies 0 $dev3
-pvcreate $dev4
-pvcreate --norestorefile -u $TEST_UUID --metadatacopies 0 $dev5
-vgcreate -c n $vg $(cat DEVICES)
-lvcreate -n $lv -l 5 -i5 -I256 $vg
+vgcreate $vg "${DEVICES[@]}"
 
-# test *scan and *display tools
-pvscan
-vgscan
-lvscan
-lvmdiskscan
-vgdisplay --units k
-lvdisplay --units g
-for i in h b s k m g t p e H B S K M G T P E ; do
-    pvdisplay --units "$i" "$dev1"
-done
-
-# test vgexport vgimport tools
-vgchange -an $vg
-vgexport $vg
-vgimport $vg
-vgchange -ay $vg
+lvcreate -l 5 -i5 -I256 -n $lv $vg
+lvcreate -aey -l 5 -n $lv1 $vg
+lvcreate -s -l 5 -n $lv2 $vg/$lv1
+pvck "$dev1"
 
 # "-persistent y --major 254 --minor 20"
 # "-persistent n"
-# test various lvm utils
-for i in dumpconfig formats segtypes; do
-    lvm "$i"
+for i in pr "p rw" "-monitor y" "-monitor n" -refresh; do
+	lvchange -$i $vg/$lv
 done
 
-for i in pr "p rw" an ay "-monitor y" "-monitor n" \
-        -resync -refresh "-addtag MYTAG" "-deltag MYETAG"; do
-    lvchange -$i "$vg"/"$lv"
-done
+lvrename $vg $lv $lv-rename
+invalid lvrename $vg
+invalid lvrename $vg $vg/$lv-rename $vg1/$lv
+invalid lvrename $vg/$lv-rename $vg1/$lv $vg
+invalid lvrename $vg/$lv-rename $vg/012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+invalid lvrename $vg/$lv-rename $vg/""
+invalid lvrename $vg/$lv-rename "$vg/!@#$%"
+invalid lvrename $vg/$lv-rename $vg/$lv-rename
+fail lvrename $vg1/$lv-rename $vg1/$lv
 
-pvck "$dev1"
-vgck "$vg"
-lvrename "$vg" "$lv" "$lv-rename"
-vgcfgbackup -f "$(pwd)/backup.$$" "$vg"
-vgchange -an "$vg"
-vgcfgrestore  -f "$(pwd)/backup.$$" "$vg"
-pvremove -y -ff $dev5
-not vgcfgrestore  -f "$(pwd)/backup.$$" "$vg"
-pvcreate -u $TEST_UUID --restorefile  "$(pwd)/backup.$$" $dev5
-vgremove -f "$vg"
+vgremove -f $vg
+
+
+# test pvresize functionality
+# missing params
+not pvresize
+# negative size
+not pvresize --setphysicalvolumesize -10M "$dev1"
+# not existing device
+not pvresize --setphysicalvolumesize 10M "$dev7"
 pvresize --setphysicalvolumesize 10M "$dev1"
+pvresize "$dev1"
 
-# test various errors and obsoleted tools
-not lvmchange
-not lvrename "$vg"
-not lvrename "$vg-xxx"
-not lvrename "$vg"  "$vg"/"$lv-rename" "$vg"/"$lv"
+
+# test various lvm utils
+lvm dumpconfig
+lvm devtypes
+lvm formats
+lvm segtypes
+lvm tags
+
+
+# test obsoleted tools
+not lvm lvmchange
+not lvm lvmsadc
+not lvm lvmsar
+not lvm pvdata

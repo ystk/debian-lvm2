@@ -17,8 +17,8 @@
 
 /* FIXME This stuff must be configurable. */
 
-#define	DM_EVENT_FIFO_CLIENT	"/var/run/dmeventd-client"
-#define	DM_EVENT_FIFO_SERVER	"/var/run/dmeventd-server"
+#define	DM_EVENT_FIFO_CLIENT	DEFAULT_DM_RUN_DIR "/dmeventd-client"
+#define	DM_EVENT_FIFO_SERVER	DEFAULT_DM_RUN_DIR "/dmeventd-server"
 
 #define DM_EVENT_DEFAULT_TIMEOUT 10
 
@@ -34,6 +34,7 @@ enum dm_event_command {
 	DM_EVENT_CMD_HELLO,
 	DM_EVENT_CMD_DIE,
 	DM_EVENT_CMD_GET_STATUS,
+	DM_EVENT_CMD_GET_PARAMETERS,
 };
 
 /* Message passed between client and daemon. */

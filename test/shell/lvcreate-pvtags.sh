@@ -1,3 +1,4 @@
+#!/bin/sh
 # Copyright (C) 2008 Red Hat, Inc. All rights reserved.
 #
 # This copyrighted material is made available to anyone wishing to use,
@@ -8,16 +9,16 @@
 # along with this program; if not, write to the Free Software Foundation,
 # Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
-. lib/test
+. lib/inittest
 
 aux prepare_pvs 3
 aux lvmconf 'allocation/maximise_cling = 0'
 aux lvmconf 'allocation/mirror_logs_require_separate_pvs = 1'
 
 # not required, just testing
-aux pvcreate --metadatacopies 0 $dev1
+aux pvcreate --metadatacopies 0 "$dev1"
 
-vgcreate -c n $vg $(cat DEVICES)
+vgcreate $vg $(cat DEVICES)
 pvchange --addtag fast $(cat DEVICES)
 
 # 3 stripes with 3 PVs (selected by tag, @fast) is fine
@@ -27,21 +28,21 @@ lvcreate -l3 -i3 $vg @fast
 not lvcreate -l4 -i4 $vg @fast
 
 # 2 stripes is too many with just one PV
-not lvcreate -l2 -i2 $vg $DM_DEV_DIR/mapper/pv1
+not lvcreate -l2 -i2 $vg "$DM_DEV_DIR/mapper/pv1"
 
 # lvcreate mirror
-lvcreate -l1 -m1 $vg @fast
+lvcreate -aey -l1 --type mirror -m1 --nosync $vg @fast
 
 # lvcreate mirror w/corelog
-lvcreate -l1 -m2 --corelog $vg @fast
+lvcreate -aey -l1 --type mirror -m2 --corelog --nosync $vg @fast
 
 # lvcreate mirror w/no free PVs
-not lvcreate -l1 -m2 $vg @fast
+not lvcreate -aey -l1 --type mirror -m2 $vg @fast
 
 # lvcreate mirror (corelog, w/no free PVs)
-not lvcreate -l1 -m3 --corelog $vg @fast
+not lvcreate -aey -l1 --type mirror -m3 --corelog $vg @fast
 
 # lvcreate mirror with a single PV arg
-not lvcreate -l1 -m1 --corelog $vg $dev1
+not lvcreate -aey -l1 --type mirror -m1 --corelog $vg "$dev1"
 
 vgremove -ff $vg

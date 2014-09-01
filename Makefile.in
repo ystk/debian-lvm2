@@ -16,7 +16,7 @@ srcdir = @srcdir@
 top_srcdir = @top_srcdir@
 top_builddir = @top_builddir@
 
-SUBDIRS = doc include man scripts
+SUBDIRS = conf daemons include lib libdaemon libdm man scripts tools
 
 ifeq ("@UDEV_RULES@", "yes")
   SUBDIRS += udev
@@ -26,22 +26,24 @@ ifeq ("@INTL@", "yes")
   SUBDIRS += po
 endif
 
-SUBDIRS += lib tools daemons libdm
-
 ifeq ("@APPLIB@", "yes")
   SUBDIRS += liblvm
 endif
 
-ifeq ("@BUILD_LVMETAD@", "yes")
-  SUBDIRS += libdaemon
+ifeq ("@PYTHON_BINDINGS@", "yes")
+  SUBDIRS += python
 endif
 
+ifeq ($(MAKECMDGOALS),clean)
+  SUBDIRS += test
+endif
 # FIXME Should use intermediate Makefiles here!
 ifeq ($(MAKECMDGOALS),distclean)
-  SUBDIRS = doc include man scripts \
+  SUBDIRS = conf include man test scripts \
     libdaemon lib tools daemons libdm \
-    udev po liblvm test \
+    udev po liblvm python \
     unit-tests/datastruct unit-tests/mm unit-tests/regex
+tools.distclean: test.distclean
 endif
 DISTCLEAN_DIRS += lcov_reports*
 DISTCLEAN_TARGETS += config.cache config.log config.status make.tmpl
@@ -49,17 +51,20 @@ DISTCLEAN_TARGETS += config.cache config.log config.status make.tmpl
 include make.tmpl
 
 libdm: include
+libdaemon: include
 lib: libdm libdaemon
 liblvm: lib
 daemons: lib libdaemon tools
 tools: lib libdaemon device-mapper
 po: tools daemons
+scripts: liblvm libdm
 
 lib.device-mapper: include.device-mapper
 libdm.device-mapper: include.device-mapper
 liblvm.device-mapper: include.device-mapper
 daemons.device-mapper: libdm.device-mapper
 tools.device-mapper: libdm.device-mapper
+scripts.device-mapper: include.device-mapper
 device-mapper: tools.device-mapper daemons.device-mapper man.device-mapper
 
 ifeq ("@INTL@", "yes")
@@ -68,6 +73,10 @@ tools.pofile: lib.pofile
 daemons.pofile: lib.pofile
 po.pofile: tools.pofile daemons.pofile
 pofile: po.pofile
+endif
+
+ifeq ("@PYTHON_BINDINGS@", "yes")
+python: liblvm
 endif
 
 ifneq ("$(CFLOW_CMD)", "")
@@ -83,7 +92,7 @@ all: cscope.out
 endif
 DISTCLEAN_TARGETS += cscope.out
 
-check check_cluster check_local unit: all
+check check_system check_cluster check_local check_lvmetad unit: all
 	$(MAKE) -C test $(@)
 
 install_system_dirs:
@@ -98,8 +107,17 @@ install_system_dirs:
 install_initscripts: 
 	$(MAKE) -C scripts install_initscripts
 
+install_systemd_generators:
+	$(MAKE) -C scripts install_systemd_generators
+	$(MAKE) -C man install_systemd_generators
+
 install_systemd_units:
 	$(MAKE) -C scripts install_systemd_units
+
+ifeq ("@PYTHON_BINDINGS@", "yes")
+install_python_bindings:
+	$(MAKE) -C liblvm/python install_python_bindings
+endif
 
 install_tmpfiles_configuration:
 	$(MAKE) -C scripts install_tmpfiles_configuration
@@ -123,11 +141,10 @@ lcov-reset:
 
 # maybe use subdirs processing to create tracefiles...
 $(LCOV_TRACES):
-	$(LCOV) -b $(basename $@) \
-		-d $(basename $@) -c -o - | $(SED) \
+	$(LCOV) -b $(basename $@) -d $(basename $@) \
+		--ignore-errors source -c -o - | $(SED) \
 		-e "s/\(dmeventd_lvm.[ch]\)/plugins\/lvm2\/\1/" \
-		-e "s/\(dmeventd_mirror.c\)/plugins\/mirror\/\1/" \
-		-e "s/\(dmeventd_snapshot.c\)/plugins\/snapshot\/\1/" \
+		-e "s/dmeventd_\(mirror\|snapshot\|thin\|raid\)\.c/plugins\/\1\/dmeventd_\1\.c/" \
 		>$@
 
 ifneq ("$(GENHTML)", "")
@@ -147,7 +164,7 @@ ifeq ("$(TESTING)", "yes")
 # testing and report generation
 RUBY=ruby1.9 -Ireport-generators/lib -Ireport-generators/test
 
-.PHONEY: unit-test ruby-test test-programs
+.PHONY: unit-test ruby-test test-programs
 
 # FIXME: put dependencies on libdm and liblvm
 # FIXME: Should be handled by Makefiles in subdirs, not here at top level.

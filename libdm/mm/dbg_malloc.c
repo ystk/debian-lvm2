@@ -16,7 +16,7 @@
 #include "dmlib.h"
 
 #ifdef VALGRIND_POOL
-#include "valgrind/memcheck.h"
+#include "memcheck.h"
 #endif
 
 #include <assert.h>
@@ -117,7 +117,7 @@ void *dm_malloc_aux_debug(size_t s, const char *file, int line)
 	if (_mem_stats.bytes > _mem_stats.mbytes)
 		_mem_stats.mbytes = _mem_stats.bytes;
 
-	/* log_debug("Allocated: %u %u %u", nb->id, _mem_stats.blocks_allocated,
+	/* log_debug_mem("Allocated: %u %u %u", nb->id, _mem_stats.blocks_allocated,
 		  _mem_stats.bytes); */
 #ifdef VALGRIND_POOL
 	VALGRIND_MAKE_MEM_UNDEFINED(nb + 1, s);
@@ -205,7 +205,6 @@ int dm_dump_memory_debug(void)
 	unsigned long tot = 0;
 	struct memblock *mb;
 	char str[32];
-	size_t c;
 
 	if (_head)
 		log_very_verbose("You have a memory leak:");
@@ -218,6 +217,8 @@ int dm_dump_memory_debug(void)
 		 */
 		str[0] = '\0';
 #else
+		size_t c;
+
 		for (c = 0; c < sizeof(str) - 1; c++) {
 			if (c >= mb->length)
 				str[c] = ' ';

@@ -30,7 +30,6 @@
 #include <dirent.h>
 #include <errno.h>
 #include <unistd.h>
-#include <libgen.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <sys/param.h>
@@ -85,7 +84,7 @@ extern char *optarg;
        __result; }))
 #endif
 
-#ifdef linux
+#ifdef __linux__
 #  include "kdev_t.h"
 #else
 #  define MAJOR(x) major((x))
@@ -121,6 +120,7 @@ enum {
 	ADD_NODE_ON_RESUME_ARG,
 	CHECKS_ARG,
 	COLS_ARG,
+	SELECT_ARG,
 	EXEC_ARG,
 	FORCE_ARG,
 	GID_ARG,
@@ -380,8 +380,10 @@ static struct dm_split_name *_get_split_name(const char *uuid, const char *name,
 		return NULL;
 	}
 
-	if (!(split_name->subsystem = _extract_uuid_prefix(uuid, separator)))
+	if (!(split_name->subsystem = _extract_uuid_prefix(uuid, separator))) {
+		dm_free(split_name);
 		return_NULL;
+	}
 
 	split_name->vg_name = split_name->lv_name =
 	    split_name->lv_layer = (char *) "";
@@ -460,7 +462,7 @@ static void _display_info_long(struct dm_task *dmt, struct dm_info *info)
 	uint32_t read_ahead;
 
 	if (!info->exists) {
-		printf("Device does not exist.\n");
+		fprintf(stderr, "Device does not exist.\n");
 		return;
 	}
 
@@ -717,7 +719,7 @@ static int _do_rename(const char *name, const char *new_name, const char *new_uu
 	if (new_uuid) {
 		if (!dm_task_set_newuuid(dmt, new_uuid))
 			goto out;
-	} else if (!dm_task_set_newname(dmt, new_name))
+	} else if (!new_name || !dm_task_set_newname(dmt, new_name))
 		goto out;
 
 	if (_switches[NOOPENCOUNT_ARG] && !dm_task_no_open_count(dmt))
@@ -769,6 +771,9 @@ static int _message(CMD_ARGS)
 	size_t sz = 1;
 	struct dm_task *dmt;
 	char *str;
+	const char *response;
+	uint64_t sector;
+	char *endptr;
 
 	if (!(dmt = dm_task_create(DM_DEVICE_TARGET_MSG)))
 		return 0;
@@ -783,7 +788,12 @@ static int _message(CMD_ARGS)
 		argv++;
 	}
 
-	if (!dm_task_set_sector(dmt, (uint64_t) atoll(argv[1])))
+	sector = strtoull(argv[1], &endptr, 10);
+	if (*endptr || endptr == argv[1]) {
+		err("invalid sector");
+		goto out;
+	}
+	if (!dm_task_set_sector(dmt, sector))
 		goto out;
 
 	argc -= 2;
@@ -824,6 +834,13 @@ static int _message(CMD_ARGS)
 
 	if (!dm_task_run(dmt))
 		goto out;
+
+	if ((response = dm_task_get_message_response(dmt))) {
+		if (!*response || response[strlen(response) - 1] == '\n')
+			fputs(response, stdout);
+		else
+			puts(response);
+	}
 
 	r = 1;
 
@@ -975,7 +992,7 @@ static int _udevcomplete(CMD_ARGS)
 }
 
 #ifndef UDEV_SYNC_SUPPORT
-static const char _cmd_not_supported[] = "Command not supported. Recompile with \"--enable-udev-sync\" to enable.";
+static const char _cmd_not_supported[] = "Command not supported. Recompile with \"--enable-udev_sync\" to enable.";
 
 static int _udevcreatecookie(CMD_ARGS)
 {
@@ -1008,11 +1025,9 @@ static int _udevcookies(CMD_ARGS)
 #else	/* UDEV_SYNC_SUPPORT */
 static int _set_up_udev_support(const char *dev_dir)
 {
-	struct udev *udev;
-	const char *udev_dev_dir;
-	size_t udev_dev_dir_len;
 	int dirs_diff;
 	const char *env;
+	size_t len = strlen(dev_dir), udev_dir_len = strlen(DM_UDEV_DEV_DIR);
 
 	if (_switches[NOUDEVSYNC_ARG])
 		dm_udev_set_sync_support(0);
@@ -1030,14 +1045,6 @@ static int _set_up_udev_support(const char *dev_dir)
 			  " defined by --udevcookie option.",
 			  _udev_cookie);
 
-	if (!(udev = udev_new()) ||
-	    !(udev_dev_dir = udev_get_dev_path(udev)) ||
-	    !*udev_dev_dir) {
-		log_error("Could not get udev dev path.");
-		return 0;
-	}
-	udev_dev_dir_len = strlen(udev_dev_dir);
-
 	/*
 	 * Normally, there's always a fallback action by libdevmapper if udev
 	 * has not done its job correctly, e.g. the nodes were not created.
@@ -1049,12 +1056,17 @@ static int _set_up_udev_support(const char *dev_dir)
 	 * is the same as "dev path" used by libdevmapper.
 	 */
 
-	/* There's always a slash at the end of dev_dir. But check udev_dev_dir! */
-	if (udev_dev_dir[udev_dev_dir_len - 1] != '/')
-		dirs_diff = strncmp(dev_dir, udev_dev_dir, udev_dev_dir_len);
-	else
-		dirs_diff = strcmp(dev_dir, udev_dev_dir);
 
+	/*
+	 * DM_UDEV_DEV_DIR always has '/' at its end.
+	 * If the dev_dir does not have it, be sure
+	 * to make the right comparison without the '/' char!
+	 */
+	if (dev_dir[len - 1] != '/')
+		udev_dir_len--;
+
+	dirs_diff = udev_dir_len != len ||
+		    strncmp(DM_UDEV_DEV_DIR, dev_dir, len);
 	_udev_only = !dirs_diff && (_udev_cookie || !_switches[VERIFYUDEV_ARG]);
 
 	if (dirs_diff) {
@@ -1064,11 +1076,10 @@ static int _set_up_udev_support(const char *dev_dir)
 			  "about udev not working correctly while processing "
 			  "particular nodes will be suppressed. These nodes "
 			  "and symlinks will be managed in each directory "
-			  "separately.", dev_dir, udev_dev_dir);
+			  "separately.", dev_dir, DM_UDEV_DEV_DIR);
 		dm_udev_set_checking(0);
 	}
 
-	udev_unref(udev);
 	return 1;
 }
 
@@ -1137,7 +1148,7 @@ static int _udevcomplete_all(CMD_ARGS)
 	unsigned age = 0;
 	time_t t;
 
-	if (argc == 2 && (sscanf(argv[1], "%i", &age) != 1)) {
+	if (argc == 2 && (sscanf(argv[1], "%u", &age) != 1)) {
 		log_error("Failed to read age_in_minutes parameter.");
 		return 0;
 	}
@@ -1488,8 +1499,16 @@ error:
 
 static int _remove(CMD_ARGS)
 {
-	if (_switches[FORCE_ARG] && argc > 1)
+	if (_switches[FORCE_ARG] && argc > 1) {
+		/*
+		 * 'remove --force' option is doing 2 operations on the same device
+		 * this is not compatible with the use of --udevcookie/DM_UDEV_COOKIE.
+		 * Udevd collision could be partially avoided with --retry.
+		 */
+		if (_udev_cookie)
+			log_warn("WARNING: Use of cookie and --force is not compatible.");
 		(void) _error_device(cmd, argc, argv, NULL, 0);
+	}
 
 	return _simple(DM_DEVICE_REMOVE, argc > 1 ? argv[1] : NULL, 0, 0);
 }
@@ -1646,6 +1665,9 @@ static int _status(CMD_ARGS)
 		goto out;
 
 	if (_switches[CHECKS_ARG] && !dm_task_enable_checks(dmt))
+		goto out;
+
+	if (_switches[NOFLUSH_ARG] && !dm_task_no_flush(dmt))
 		goto out;
 
 	if (!dm_task_run(dmt))
@@ -2285,7 +2307,7 @@ static int _dm_mangled_name_disp(struct dm_report *rh,
 	int r = 0;
 
 	if ((name = dm_task_get_name_mangled((const struct dm_task *) data))) {
-		r = dm_report_field_string(rh, field, (const char **) &name);
+		r = dm_report_field_string(rh, field, (const char * const *) &name);
 		dm_free(name);
 	}
 
@@ -2301,7 +2323,7 @@ static int _dm_unmangled_name_disp(struct dm_report *rh,
 	int r = 0;
 
 	if ((name = dm_task_get_name_unmangled((const struct dm_task *) data))) {
-		r = dm_report_field_string(rh, field, (const char **) &name);
+		r = dm_report_field_string(rh, field, (const char * const *) &name);
 		dm_free(name);
 	}
 
@@ -2319,6 +2341,38 @@ static int _dm_uuid_disp(struct dm_report *rh,
 		uuid = "";
 
 	return dm_report_field_string(rh, field, &uuid);
+}
+
+static int _dm_mangled_uuid_disp(struct dm_report *rh,
+				 struct dm_pool *mem __attribute__((unused)),
+				 struct dm_report_field *field,
+				 const void *data, void *private __attribute__((unused)))
+{
+	char *uuid;
+	int r = 0;
+
+	if ((uuid = dm_task_get_uuid_mangled((const struct dm_task *) data))) {
+		r = dm_report_field_string(rh, field, (const char * const *) &uuid);
+		dm_free(uuid);
+	}
+
+	return r;
+}
+
+static int _dm_unmangled_uuid_disp(struct dm_report *rh,
+				   struct dm_pool *mem __attribute__((unused)),
+				   struct dm_report_field *field,
+				   const void *data, void *private __attribute__((unused)))
+{
+	char *uuid;
+	int r = 0;
+
+	if ((uuid = dm_task_get_uuid_unmangled((const struct dm_task *) data))) {
+		r = dm_report_field_string(rh, field, (const char * const *) &uuid);
+		dm_free(uuid);
+	}
+
+	return r;
 }
 
 static int _dm_read_ahead_disp(struct dm_report *rh,
@@ -2733,6 +2787,7 @@ static const struct dm_report_object_type _report_types[] = {
 #define OFFSET_OF(strct, field) (((char*)&((struct strct*)0)->field) - (char*)0)
 #define STR (DM_REPORT_FIELD_TYPE_STRING)
 #define NUM (DM_REPORT_FIELD_TYPE_NUMBER)
+#define SIZ (DM_REPORT_FIELD_TYPE_SIZE)
 #define FIELD_O(type, strct, sorttype, head, field, width, func, id, desc) {DR_ ## type, sorttype, OFFSET_OF(strct, field), width, id, head, &_ ## func ## _disp, desc},
 #define FIELD_F(type, sorttype, head, width, func, id, desc) {DR_ ## type, sorttype, 0, width, id, head, &_ ## func ## _disp, desc},
 
@@ -2742,6 +2797,8 @@ FIELD_F(TASK, STR, "Name", 16, dm_name, "name", "Name of mapped device.")
 FIELD_F(TASK, STR, "MangledName", 16, dm_mangled_name, "mangled_name", "Mangled name of mapped device.")
 FIELD_F(TASK, STR, "UnmangledName", 16, dm_unmangled_name, "unmangled_name", "Unmangled name of mapped device.")
 FIELD_F(TASK, STR, "UUID", 32, dm_uuid, "uuid", "Unique (optional) identifier for mapped device.")
+FIELD_F(TASK, STR, "MangledUUID", 32, dm_mangled_uuid, "mangled_uuid", "Mangled unique (optional) identifier for mapped device.")
+FIELD_F(TASK, STR, "UnmangledUUID", 32, dm_unmangled_uuid, "unmangled_uuid", "Unmangled unique (optional) identifier for mapped device.")
 
 /* FIXME Next one should be INFO */
 FIELD_F(TASK, NUM, "RAhead", 6, dm_read_ahead, "read_ahead", "Read ahead in sectors.")
@@ -2759,9 +2816,9 @@ FIELD_O(INFO, dm_info, NUM, "Targ", target_count, 4, int32, "segments", "Number 
 FIELD_O(INFO, dm_info, NUM, "Event", event_nr, 6, uint32, "events", "Number of most recent event.")
 
 FIELD_O(DEPS, dm_deps, NUM, "#Devs", count, 5, int32, "device_count", "Number of devices used by this one.")
-FIELD_F(TREE, STR, "DevNames", 8, dm_deps_names, "devs_used", "List of names of mapped devices used by this one.")
-FIELD_F(DEPS, STR, "DevNos", 6, dm_deps, "devnos_used", "List of device numbers of devices used by this one.")
-FIELD_F(DEPS, STR, "BlkDevNames", 16, dm_deps_blk_names, "blkdevs_used", "List of names of block devices used by this one.")
+FIELD_F(TREE, STR, "DevNamesUsed", 16, dm_deps_names, "devs_used", "List of names of mapped devices used by this one.")
+FIELD_F(DEPS, STR, "DevNosUsed", 16, dm_deps, "devnos_used", "List of device numbers of devices used by this one.")
+FIELD_F(DEPS, STR, "BlkDevNamesUsed", 16, dm_deps_blk_names, "blkdevs_used", "List of names of block devices used by this one.")
 
 FIELD_F(TREE, NUM, "#Refs", 5, dm_tree_parents_count, "device_ref_count", "Number of mapped devices referencing this one.")
 FIELD_F(TREE, STR, "RefNames", 8, dm_tree_parents_names, "names_using_dev", "List of names of mapped devices using this one.")
@@ -2778,6 +2835,7 @@ FIELD_O(NAME, dm_split_name, STR, "LVLayer", lv_layer, 7, dm_lv_layer_name, "lv_
 
 #undef STR
 #undef NUM
+#undef SIZ
 #undef FIELD_O
 #undef FIELD_F
 
@@ -2789,6 +2847,7 @@ static int _report_init(const struct command *cmd)
 	char *options = (char *) default_report_options;
 	const char *keys = "";
 	const char *separator = " ";
+	const char *selection = NULL;
 	int aligned = 1, headings = 1, buffered = 1, field_prefixes = 0;
 	int quoted = 1, columns_as_rows = 0;
 	uint32_t flags = 0;
@@ -2852,6 +2911,9 @@ static int _report_init(const struct command *cmd)
 		aligned = 0;
 	}
 
+	if (_switches[SELECT_ARG] && _string_args[SELECT_ARG])
+		selection = _string_args[SELECT_ARG];
+
 	if (aligned)
 		flags |= DM_REPORT_OUTPUT_ALIGNED;
 
@@ -2870,9 +2932,9 @@ static int _report_init(const struct command *cmd)
 	if (columns_as_rows)
 		flags |= DM_REPORT_OUTPUT_COLUMNS_AS_ROWS;
 
-	if (!(_report = dm_report_init(&_report_type,
-				       _report_types, _report_fields,
-				       options, separator, flags, keys, NULL)))
+	if (!(_report = dm_report_init_with_selection(&_report_type, _report_types,
+				_report_fields, options, separator, flags, keys,
+				selection, NULL, NULL)))
 		goto out;
 
 	if ((_report_type & DR_TREE) && !_build_whole_deptree(cmd)) {
@@ -2886,9 +2948,6 @@ static int _report_init(const struct command *cmd)
 	r = 1;
 
 out:
-	if (!strcasecmp(options, "help") || !strcmp(options, "?"))
-		r = 1;
-
 	if (len)
 		dm_free(options);
 
@@ -2911,8 +2970,8 @@ static int _ls(CMD_ARGS)
 
 static int _mangle(CMD_ARGS)
 {
-	char *name;
-	char *new_name = NULL;
+	const char *name, *uuid;
+	char *new_name = NULL, *new_uuid = NULL;
 	struct dm_task *dmt;
 	struct dm_info info;
 	int r = 0;
@@ -2941,25 +3000,49 @@ static int _mangle(CMD_ARGS)
 	if (!dm_task_get_info(dmt, &info) || !info.exists)
 		goto out;
 
+	uuid = dm_task_get_uuid(dmt);
+
 	target_format = _switches[MANGLENAME_ARG] ? _int_args[MANGLENAME_ARG]
 						  : DEFAULT_DM_NAME_MANGLING;
 
-	if (target_format == DM_STRING_MANGLING_AUTO && strstr(name, "\\x5cx")) {
-		log_error("The name \"%s\" seems to be mangled more than once. "
-			  "Manual intervention required to rename the device.", name);
-		goto out;
+	if (target_format == DM_STRING_MANGLING_AUTO) {
+		if (strstr(name, "\\x5cx")) {
+			log_error("The name \"%s\" seems to be mangled more than once. "
+				  "Manual intervention required to rename the device.", name);
+			goto out;
+		}
+		if (strstr(uuid, "\\x5cx")) {
+			log_error("The UUID \"%s\" seems to be mangled more than once. "
+				  "Manual intervention required to correct the device UUID.", uuid);
+			goto out;
+		}
 	}
 
 	if (target_format == DM_STRING_MANGLING_NONE) {
 		if (!(new_name = dm_task_get_name_unmangled(dmt)))
 			goto out;
+		if (!(new_uuid = dm_task_get_uuid_unmangled(dmt)))
+			goto out;
 	}
-	else if (!(new_name = dm_task_get_name_mangled(dmt)))
+	else {
+		if (!(new_name = dm_task_get_name_mangled(dmt)))
+			goto out;
+		if (!(new_uuid = dm_task_get_uuid_mangled(dmt)))
+			goto out;
+	}
+
+	/* We can't rename the UUID, the device must be reactivated manually. */
+	if (strcmp(uuid, new_uuid)) {
+		log_error("%s: %s: UUID in incorrect form. ", name, uuid);
+		log_error("Unable to change device UUID. The device must be deactivated first.");
+		r = 0;
 		goto out;
+	}
 
 	/* Nothing to do if the name is in correct form already. */
 	if (!strcmp(name, new_name)) {
-		log_print("%s: name already in correct form", name);
+		log_print("%s: %s: name %salready in correct form", name,
+			  *uuid ? uuid : "[no UUID]", *uuid ? "and UUID " : "");
 		r = 1;
 		goto out;
 	}
@@ -2971,6 +3054,7 @@ static int _mangle(CMD_ARGS)
 
 out:
 	dm_free(new_name);
+	dm_free(new_uuid);
 	dm_task_destroy(dmt);
 	return r;
 }
@@ -3000,9 +3084,9 @@ static struct command _commands[] = {
 	{"ls", "[--target <target_type>] [--exec <command>] [-o options] [--tree]", 0, 0, 0, _ls},
 	{"info", "[<device>]", 0, -1, 1, _info},
 	{"deps", "[-o options] [<device>]", 0, -1, 1, _deps},
-	{"status", "[<device>] [--target <target_type>]", 0, -1, 1, _status},
+	{"status", "[<device>] [--noflush] [--target <target_type>]", 0, -1, 1, _status},
 	{"table", "[<device>] [--target <target_type>] [--showkeys]", 0, -1, 1, _status},
-	{"wait", "<device> [<event_nr>]", 0, 2, 0, _wait},
+	{"wait", "<device> [<event_nr>] [--noflush]", 0, 2, 0, _wait},
 	{"mknodes", "[<device>]", 0, -1, 1, _mknodes},
 	{"mangle", "[<device>]", 0, -1, 1, _mangle},
 	{"udevcreatecookie", "", 0, 0, 0, _udevcreatecookie},
@@ -3029,7 +3113,8 @@ static void _usage(FILE *out)
 		"        [--udevcookie [cookie]] [--noudevrules] [--noudevsync] [--verifyudev]\n"
 		"        [-y|--yes] [--readahead [+]<sectors>|auto|none] [--retry]\n"
 		"        [-c|-C|--columns] [-o <fields>] [-O|--sort <sort_fields>]\n"
-		"        [--nameprefixes] [--noheadings] [--separator <separator>]\n\n");
+		"        [-S|--select <selection>] [--nameprefixes] [--noheadings]\n"
+		"        [--separator <separator>]\n\n");
 	for (i = 0; _commands[i].name; i++)
 		fprintf(out, "\t%s %s\n", _commands[i].name, _commands[i].help);
 	fprintf(out, "\n<device> may be device name or -u <uuid> or "
@@ -3187,20 +3272,19 @@ static char *parse_loop_device_name(const char *dev, const char *dev_dir)
 		    device[strlen(dev_dir)] != '/')
 			goto error;
 
-		strncpy(buf, strrchr(device, '/') + 1, PATH_MAX - 1);
-		buf[PATH_MAX - 1] = '\0';
+		if (!dm_strncpy(buf, strrchr(device, '/') + 1, PATH_MAX))
+			goto error;
 		dm_free(device);
-
 	} else {
 		/* check for device number */
-		if (!strncmp(dev, "loop", strlen("loop")))
-			strncpy(buf, dev, (size_t) PATH_MAX);
-		else
+		if (strncmp(dev, "loop", sizeof("loop") - 1))
+			goto error;
+
+		if (!dm_strncpy(buf, dev, PATH_MAX))
 			goto error;
 	}
 
 	return buf;
-
 error:
 	dm_free(device);
 	dm_free(buf);
@@ -3437,6 +3521,7 @@ static int _process_switches(int *argc, char ***argv, const char *dev_dir)
 		{"readonly", 0, &ind, READ_ONLY},
 		{"checks", 0, &ind, CHECKS_ARG},
 		{"columns", 0, &ind, COLS_ARG},
+		{"select", 1, &ind, SELECT_ARG},
 		{"exec", 1, &ind, EXEC_ARG},
 		{"force", 0, &ind, FORCE_ARG},
 		{"gid", 1, &ind, GID_ARG},
@@ -3534,7 +3619,7 @@ static int _process_switches(int *argc, char ***argv, const char *dev_dir)
 
 	optarg = 0;
 	optind = OPTIND_INIT;
-	while ((ind = -1, c = GETOPTLONG_FN(*argc, *argv, "cCfG:hj:m:M:no:O:ru:U:vy",
+	while ((ind = -1, c = GETOPTLONG_FN(*argc, *argv, "cCfG:hj:m:M:no:O:rS:u:U:vy",
 					    long_options, NULL)) != -1) {
 		if (c == ':' || c == '?')
 			return 0;
@@ -3567,6 +3652,10 @@ static int _process_switches(int *argc, char ***argv, const char *dev_dir)
 		if (c == 'O' || ind == SORT_ARG) {
 			_switches[SORT_ARG]++;
 			_string_args[SORT_ARG] = optarg;
+		}
+		if (c == 'S' || ind == SELECT_ARG) {
+			_switches[SELECT_ARG]++;
+			_string_args[SELECT_ARG] = optarg;
 		}
 		if (c == 'v' || ind == VERBOSE_ARG)
 			_switches[VERBOSE_ARG]++;
@@ -3615,7 +3704,7 @@ static int _process_switches(int *argc, char ***argv, const char *dev_dir)
 		}
 		if (ind == INACTIVE_ARG)
 		       _switches[INACTIVE_ARG]++;
-		if ((ind == MANGLENAME_ARG)) {
+		if (ind == MANGLENAME_ARG) {
 			_switches[MANGLENAME_ARG]++;
 			if (!strcasecmp(optarg, "none"))
 				_int_args[MANGLENAME_ARG] = DM_STRING_MANGLING_NONE;
@@ -3692,9 +3781,6 @@ static int _process_switches(int *argc, char ***argv, const char *dev_dir)
 		return 0;
 	}
 
-	if (!_process_options(_string_args[OPTIONS_ARG]))
-		return 0;
-
 	if (_switches[TABLE_ARG] && _switches[NOTABLE_ARG]) {
 		fprintf(stderr, "--table and --notable are incompatible.\n");
 		return 0;
@@ -3766,6 +3852,11 @@ int main(int argc, char **argv)
 
 	if (!strcmp(cmd->name, "mangle"))
 		dm_set_name_mangling_mode(DM_STRING_MANGLING_NONE);
+
+	if (!_process_options(_string_args[OPTIONS_ARG])) {
+		fprintf(stderr, "Couldn't process command line.\n");
+		goto out;
+	}
 
 	if (_switches[COLS_ARG]) {
 		if (!_report_init(cmd))

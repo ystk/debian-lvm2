@@ -165,7 +165,7 @@ static int _read_pv(struct format_instance *fid,
 	struct physical_volume *pv;
 	struct pv_list *pvl;
 	const struct dm_config_value *cv;
-	uint64_t size;
+	uint64_t size, ba_start;
 
 	if (!(pvl = dm_pool_zalloc(mem, sizeof(*pvl))) ||
 	    !(pvl->pv = dm_pool_zalloc(mem, sizeof(*pvl->pv))))
@@ -221,6 +221,12 @@ static int _read_pv(struct format_instance *fid,
 	if (!pv->dev && !lvmetad_active())
 		pv->status |= MISSING_PV;
 
+	if ((pv->status & MISSING_PV) && pv->dev && pv_mda_used_count(pv) == 0) {
+		pv->status &= ~MISSING_PV;
+		log_info("Recovering a previously MISSING PV %s with no MDAs.",
+			 pv_dev_name(pv));
+	}
+
 	/* Late addition */
 	if (dm_config_has_node(pvn, "dev_size") &&
 	    !_read_uint64(pvn, "dev_size", &pv->size)) {
@@ -229,13 +235,30 @@ static int _read_pv(struct format_instance *fid,
 	}
 
 	if (!_read_uint64(pvn, "pe_start", &pv->pe_start)) {
-		log_error("Couldn't read extent size for physical volume.");
+		log_error("Couldn't read extent start value (pe_start) "
+			  "for physical volume.");
 		return 0;
 	}
 
 	if (!_read_int32(pvn, "pe_count", &pv->pe_count)) {
 		log_error("Couldn't find extent count (pe_count) for "
 			  "physical volume.");
+		return 0;
+	}
+
+	/* Bootloader area is not compulsory - just log_debug for the record if found. */
+	ba_start = size = 0;
+	_read_uint64(pvn, "ba_start", &ba_start);
+	_read_uint64(pvn, "ba_size", &size);
+	if (ba_start && size) {
+		log_debug("Found bootloader area specification for PV %s "
+			  "in metadata: ba_start=%" PRIu64 ", ba_size=%" PRIu64 ".",
+			  pv_dev_name(pv), ba_start, size);
+		pv->ba_start = ba_start;
+		pv->ba_size = size;
+	} else if ((!ba_start && size) || (ba_start && !size)) {
+		log_error("Found incomplete bootloader area specification "
+			  "for PV %s in metadata.", pv_dev_name(pv));
 		return 0;
 	}
 
@@ -502,7 +525,7 @@ static int _read_lvnames(struct format_instance *fid __attribute__((unused)),
 {
 	struct dm_pool *mem = vg->vgmem;
 	struct logical_volume *lv;
-	const char *lv_alloc;
+	const char *str;
 	const struct dm_config_value *cv;
 	const char *hostname;
 	uint64_t timestamp = 0;
@@ -542,11 +565,22 @@ static int _read_lvnames(struct format_instance *fid __attribute__((unused)),
 	}
 
 	lv->alloc = ALLOC_INHERIT;
-	if (dm_config_get_str(lvn, "allocation_policy", &lv_alloc)) {
-		lv->alloc = get_alloc_from_string(lv_alloc);
+	if (dm_config_get_str(lvn, "allocation_policy", &str)) {
+		lv->alloc = get_alloc_from_string(str);
 		if (lv->alloc == ALLOC_INVALID) {
-			log_warn("WARNING: Ignoring unrecognised allocation policy %s for LV %s", lv_alloc, lv->name);
+			log_warn("WARNING: Ignoring unrecognised allocation policy %s for LV %s", str, lv->name);
 			lv->alloc = ALLOC_INHERIT;
+		}
+	}
+
+	if (dm_config_get_str(lvn, "profile", &str)) {
+		log_debug_metadata("Adding profile configuration %s for LV %s/%s.",
+				   str, vg->name, lv->name);
+		lv->profile = add_profile(vg->cmd, str, CONFIG_PROFILE_METADATA);
+		if (!lv->profile) {
+			log_error("Failed to add configuration profile %s for LV %s/%s",
+				  str, vg->name, lv->name);
+			return 0;
 		}
 	}
 
@@ -582,6 +616,18 @@ static int _read_lvnames(struct format_instance *fid __attribute__((unused)),
 
 	if (timestamp && !lv_set_creation(lv, hostname, timestamp))
 		return_0;
+
+	if (!lv_is_visible(lv) && strstr(lv->name, "_pmspare")) {
+		if (vg->pool_metadata_spare_lv) {
+			log_error("Couldn't use another pool metadata spare "
+				  "logical volume %s/%s.", vg->name, lv->name);
+			return 0;
+		}
+		log_debug_metadata("Logical volume %s is pool metadata spare.",
+				   lv->name);
+		lv->status |= POOL_METADATA_SPARE;
+		vg->pool_metadata_spare_lv = lv;
+	}
 
 	return 1;
 }
@@ -763,6 +809,15 @@ static struct volume_group *_read_vg(struct format_instance *fid,
 		if (vg->alloc == ALLOC_INVALID) {
 			log_warn("WARNING: Ignoring unrecognised allocation policy %s for VG %s", str, vg->name);
 			vg->alloc = ALLOC_NORMAL;
+		}
+	}
+
+	if (dm_config_get_str(vgn, "profile", &str)) {
+		log_debug_metadata("Adding profile configuration %s for VG %s.", str, vg->name);
+		vg->profile = add_profile(vg->cmd, str, CONFIG_PROFILE_METADATA);
+		if (!vg->profile) {
+			log_error("Failed to add configuration profile %s for VG %s", str, vg->name);
+			goto bad;
 		}
 	}
 

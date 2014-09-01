@@ -15,7 +15,9 @@
 #ifndef _LVM_PV_H
 #define _LVM_PV_H
 
-struct id;
+#include "uuid.h"
+#include "libdevmapper.h"
+
 struct device;
 struct format_type;
 struct volume_group;
@@ -42,6 +44,10 @@ struct physical_volume {
 
 	uint64_t status;
 	uint64_t size;
+
+	/* bootloader area */
+	uint64_t ba_start;
+	uint64_t ba_size;
 
 	/* physical extents */
 	uint32_t pe_size;
@@ -76,9 +82,13 @@ uint64_t pv_free(const struct physical_volume *pv);
 uint64_t pv_status(const struct physical_volume *pv);
 uint32_t pv_pe_size(const struct physical_volume *pv);
 uint64_t pv_pe_start(const struct physical_volume *pv);
+uint64_t pv_ba_start(const struct physical_volume *pv);
+uint64_t pv_ba_size(const struct physical_volume *pv);
 uint32_t pv_pe_count(const struct physical_volume *pv);
 uint32_t pv_pe_alloc_count(const struct physical_volume *pv);
 uint64_t pv_mda_size(const struct physical_volume *pv);
+struct lvmcache_info;
+uint64_t lvmcache_info_mda_free(struct lvmcache_info *info);
 uint64_t pv_mda_free(const struct physical_volume *pv);
 uint64_t pv_used(const struct physical_volume *pv);
 uint32_t pv_mda_count(const struct physical_volume *pv);
@@ -87,5 +97,6 @@ unsigned pv_mda_set_ignored(const struct physical_volume *pv, unsigned ignored);
 int is_orphan(const struct physical_volume *pv);
 int is_missing_pv(const struct physical_volume *pv);
 int is_pv(const struct physical_volume *pv);
+struct label *pv_label(const struct physical_volume *pv);
 
 #endif /* _LVM_PV_H */

@@ -4,6 +4,7 @@
 #
 # chkconfig: - 24 76
 # description: Cluster daemon for userland logical volume management tools.
+# pidfile: @CLVMD_PIDFILE@
 #
 # For Red-Hat-based distributions such as Fedora, RHEL, CentOS.
 #
@@ -87,7 +88,7 @@ start()
 
 	${lvm_vgscan} > /dev/null 2>&1
 
-	action "Activating VG(s):" ${lvm_vgchange} -ayl $LVM_VGS || return $?
+	action "Activating VG(s):" ${lvm_vgchange} -aay $LVM_VGS || return $?
 
 	touch $LOCK_FILE
 

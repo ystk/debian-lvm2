@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2001-2004 Sistina Software, Inc. All rights reserved.  
- * Copyright (C) 2004-2010 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2004-2013 Red Hat, Inc. All rights reserved.
  *
  * This file is part of LVM2.
  *
@@ -35,7 +35,6 @@
 //#define MAX_RESTRICTED_LVS 255	/* Used by FMT_RESTRICTED_LVIDS */
 #define MIRROR_LOG_OFFSET	2	/* sectors */
 #define VG_MEMPOOL_CHUNK	10240	/* in bytes, hint only */
-#define PV_PE_START_CALC	((uint64_t) -1) /* Calculate pe_start value */
 
 /*
  * Ceiling(n / sz)
@@ -148,12 +147,14 @@ struct metadata_area_ops {
 				    struct metadata_area *mda2);
 
 	struct device *(*mda_get_device)(struct metadata_area *mda);
-	char *(*mda_export_text)(struct metadata_area *mda);
+	int (*mda_export_text)(struct metadata_area *mda, struct dm_config_tree *cft,
+			       struct dm_config_node *parent);
 	int (*mda_import_text)(struct lvmcache_info *info, const struct dm_config_node *cn);
 };
 
 #define MDA_IGNORED      0x00000001
 #define MDA_INCONSISTENT 0x00000002
+#define MDA_FAILED       0x00000004
 
 struct metadata_area {
 	struct dm_list list;
@@ -250,11 +251,9 @@ struct format_handler {
 	 */
 	int (*pv_initialise) (const struct format_type * fmt,
 			      int64_t label_sector,
-			      uint64_t pe_start,
-			      uint32_t extent_count,
-			      uint32_t extent_size,
 			      unsigned long data_alignment,
 			      unsigned long data_alignment_offset,
+			      struct pvcreate_restorable_params *rp,
 			      struct physical_volume * pv);
 
 	/*
@@ -339,9 +338,18 @@ struct format_handler {
 unsigned long set_pe_align(struct physical_volume *pv, unsigned long data_alignment);
 unsigned long set_pe_align_offset(struct physical_volume *pv,
 				  unsigned long data_alignment_offset);
-int vg_validate(struct volume_group *vg);
 
 int pv_write_orphan(struct cmd_context *cmd, struct physical_volume *pv);
+
+int pvremove_single(struct cmd_context *cmd, const char *pv_name,
+			   void *handle __attribute__((unused)), unsigned force_count,
+			   unsigned prompt);
+
+struct physical_volume *pvcreate_vol(struct cmd_context *cmd, const char *pv_name,
+                                     struct pvcreate_params *pp, int write_now);
+
+int check_dev_block_size_for_vg(struct device *dev, const struct volume_group *vg,
+				unsigned int *max_phys_block_size_found);
 
 /* Manipulate PV structures */
 int pv_add(struct volume_group *vg, struct physical_volume *pv);
@@ -420,11 +428,10 @@ int lv_split_segment(struct logical_volume *lv, uint32_t le);
  */
 int add_seg_to_segs_using_this_lv(struct logical_volume *lv, struct lv_segment *seg);
 int remove_seg_from_segs_using_this_lv(struct logical_volume *lv, struct lv_segment *seg);
-struct lv_segment *get_only_segment_using_this_lv(struct logical_volume *lv);
+struct lv_segment *get_only_segment_using_this_lv(const struct logical_volume *lv);
 
-int for_each_sub_lv(struct cmd_context *cmd, struct logical_volume *lv,
-                    int (*fn)(struct cmd_context *cmd,
-                              struct logical_volume *lv, void *data),
+int for_each_sub_lv(struct logical_volume *lv,
+                    int (*fn)(struct logical_volume *lv, void *data),
                     void *data);
 int move_lv_segments(struct logical_volume *lv_to,
 		     struct logical_volume *lv_from,
@@ -439,7 +446,7 @@ void lv_calculate_readahead(const struct logical_volume *lv, uint32_t *read_ahea
  * For internal metadata caching.
  */
 size_t export_vg_to_buffer(struct volume_group *vg, char **buf);
-int export_vg_to_config_tree(struct volume_group *vg, struct dm_config_tree **cft);
+struct dm_config_tree *export_vg_to_config_tree(struct volume_group *vg);
 struct volume_group *import_vg_from_buffer(const char *buf,
 					   struct format_instance *fid);
 struct volume_group *import_vg_from_config_tree(const struct dm_config_tree *cft,
@@ -457,20 +464,17 @@ int fixup_imported_mirrors(struct volume_group *vg);
 /*
  * From thin_manip.c
  */
-int attach_pool_metadata_lv(struct lv_segment *pool_seg,
-			    struct logical_volume *pool_metadata_lv);
-int attach_pool_data_lv(struct lv_segment *pool_seg,
-			struct logical_volume *pool_data_lv);
 int attach_pool_lv(struct lv_segment *seg, struct logical_volume *pool_lv,
-		   struct logical_volume *origin_lv);
+		   struct logical_volume *origin_lv, struct logical_volume *merge_lv);
 int detach_pool_lv(struct lv_segment *seg);
 int attach_pool_message(struct lv_segment *pool_seg, dm_thin_message_t type,
 			struct logical_volume *lv, uint32_t delete_id,
 			int auto_increment);
+int lv_is_merging_thin_snapshot(const struct logical_volume *lv);
 int pool_has_message(const struct lv_segment *seg,
 		     const struct logical_volume *lv, uint32_t device_id);
 int pool_below_threshold(const struct lv_segment *pool_seg);
-int extend_pool(struct logical_volume *lv, const struct segment_type *segtype,
+int create_pool(struct logical_volume *lv, const struct segment_type *segtype,
 		struct alloc_handle *ah, uint32_t stripes, uint32_t stripe_size);
 
 /*
@@ -480,13 +484,10 @@ struct id pv_id(const struct physical_volume *pv);
 const struct format_type *pv_format_type(const struct physical_volume *pv);
 struct id pv_vgid(const struct physical_volume *pv);
 
-struct physical_volume *pv_by_path(struct cmd_context *cmd, const char *pv_name);
 int add_pv_to_vg(struct volume_group *vg, const char *pv_name,
 		 struct physical_volume *pv, struct pvcreate_params *pp);
 
-int is_mirror_image_removable(struct logical_volume *mimage_lv, void *baton);
-
 uint64_t find_min_mda_size(struct dm_list *mdas);
-char *tags_format_and_copy(struct dm_pool *mem, const struct dm_list *tags);
+char *tags_format_and_copy(struct dm_pool *mem, const struct dm_list *tagsl);
 
 #endif

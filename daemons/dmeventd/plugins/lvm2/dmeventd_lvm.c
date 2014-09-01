@@ -16,8 +16,6 @@
 #include "log.h"
 
 #include "lvm2cmd.h"
-#include "errors.h"
-#include "libdevmapper-event.h"
 #include "dmeventd_lvm.h"
 
 #include <pthread.h>
@@ -145,7 +143,7 @@ struct dm_pool *dmeventd_lvm2_pool(void)
 
 int dmeventd_lvm2_run(const char *cmdline)
 {
-	return lvm2_run(_lvm_handle, cmdline);
+	return (lvm2_run(_lvm_handle, cmdline) == LVM2_COMMAND_SUCCEEDED);
 }
 
 int dmeventd_lvm2_command(struct dm_pool *mem, char *buffer, size_t size,
@@ -159,6 +157,11 @@ int dmeventd_lvm2_command(struct dm_pool *mem, char *buffer, size_t size,
 		       device);
 		return 0;
 	}
+
+	/* strip off the mirror component designations */
+	if ((layer = strstr(lv, "_mimagetmp")) ||
+	    (layer = strstr(lv, "_mlog")))
+		*layer = '\0';
 
 	r = dm_snprintf(buffer, size, "%s %s/%s", cmd, vg, lv);
 

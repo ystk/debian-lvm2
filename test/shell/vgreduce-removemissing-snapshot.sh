@@ -1,3 +1,4 @@
+#!/bin/sh
 # Copyright (C) 2011 Red Hat, Inc. All rights reserved.
 #
 # This copyrighted material is made available to anyone wishing to use,
@@ -8,19 +9,29 @@
 # along with this program; if not, write to the Free Software Foundation,
 # Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
-. lib/test
+. lib/inittest
+
+exit 0
+
+#
+# Snapshots of 'mirrors' are not supported.  They can no longer be created.
+# This file could be used to test some aspect of vgreduce, snapshot, and
+# RAID at some point though...
+#
 
 aux prepare_vg 5
-lvcreate -m 3 --ig -L 2M -n 4way $vg $dev1 $dev2 $dev3 $dev4 $dev5:0
+
+lvcreate --type mirror -m 3 --ig -L 2M -n 4way $vg "$dev1" "$dev2" "$dev3" "$dev4" "$dev5":0
 lvcreate -s $vg/4way -L 2M -n snap
-lvcreate -i 2 -L 2M $vg $dev1 $dev2 -n stripe
+lvcreate -i 2 -L 2M $vg "$dev1" "$dev2" -n stripe
 
-aux disable_dev $dev2 $dev4
+aux disable_dev "$dev2" "$dev4"
 echo n | lvconvert --repair $vg/4way
-aux enable_dev $dev2 $dev4
+aux enable_dev "$dev2" "$dev4"
 #not vgreduce --removemissing $vg
-vgreduce -v --removemissing --force $vg # $dev2 $dev4
-lvs -a -o +devices | not grep unknown
-lvs -a -o +devices
-check mirror $vg 4way $dev5
+vgreduce -v --removemissing --force $vg # "$dev2" "$dev4"
+lvs -a -o +devices $vg | not grep unknown
+lvs -a -o +devices $vg
+check mirror $vg 4way "$dev5"
 
+vgremove -ff $vg

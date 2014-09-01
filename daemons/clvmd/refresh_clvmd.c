@@ -47,18 +47,18 @@ static int _clvmd_sock = -1;
 static int _open_local_sock(void)
 {
 	int local_socket;
-	struct sockaddr_un sockaddr;
+	struct sockaddr_un sockaddr = { .sun_family = AF_UNIX };
+
+	if (!dm_strncpy(sockaddr.sun_path, CLVMD_SOCKNAME, sizeof(sockaddr.sun_path))) {
+		fprintf(stderr, "%s: clvmd socket name too long.", CLVMD_SOCKNAME);
+		return -1;
+	}
 
 	/* Open local socket */
 	if ((local_socket = socket(PF_UNIX, SOCK_STREAM, 0)) < 0) {
 		fprintf(stderr, "Local socket creation failed: %s", strerror(errno));
 		return -1;
 	}
-
-	memset(&sockaddr, 0, sizeof(sockaddr));
-	memcpy(sockaddr.sun_path, CLVMD_SOCKNAME, sizeof(CLVMD_SOCKNAME));
-
-	sockaddr.sun_family = AF_UNIX;
 
 	if (connect(local_socket,(struct sockaddr *) &sockaddr,
 		    sizeof(sockaddr))) {
@@ -225,15 +225,13 @@ static int _cluster_request(char cmd, const char *node, void *data, int len,
 	 * With an extra pair of INTs on the front to sanity
 	 * check the pointer when we are given it back to free
 	 */
-	*response = dm_malloc(sizeof(lvm_response_t) * num_responses +
-			    sizeof(int) * 2);
-	if (!*response) {
+	*response = NULL;
+	if (!(rarray = dm_malloc(sizeof(lvm_response_t) * num_responses +
+				 sizeof(int) * 2))) {
 		errno = ENOMEM;
 		status = 0;
 		goto out;
 	}
-
-	rarray = *response;
 
 	/* Unpack the response into an lvm_response_t array */
 	inptr = head->args;
@@ -251,9 +249,9 @@ static int _cluster_request(char cmd, const char *node, void *data, int len,
 			int j;
 			for (j = 0; j < i; j++)
 				dm_free(rarray[i].response);
-			free(*response);
+			dm_free(rarray);
 			errno = ENOMEM;
-			status = -1;
+			status = 0;
 			goto out;
 		}
 
@@ -266,8 +264,7 @@ static int _cluster_request(char cmd, const char *node, void *data, int len,
 	*response = rarray;
 
       out:
-	if (retbuf)
-		dm_free(retbuf);
+	dm_free(retbuf);
 
 	return status;
 }

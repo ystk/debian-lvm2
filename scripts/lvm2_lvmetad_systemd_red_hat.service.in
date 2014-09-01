@@ -1,17 +1,18 @@
 [Unit]
 Description=LVM2 metadata daemon
+Documentation=man:lvmetad(8)
 Requires=lvm2-lvmetad.socket
 After=lvm2-lvmetad.socket
 DefaultDependencies=no
 Conflicts=shutdown.target
 
 [Service]
-Type=forking
+Type=simple
 NonBlocking=true
-ExecStart=@sbindir@/lvmetad
-ExecStartPost=@sbindir@/vgscan
-ExecReload=@sbindir@/lvmetad -R
-PIDFile=@DEFAULT_RUN_DIR@/lvmetad.pid
+ExecStart=@sbindir@/lvmetad -f
+Environment=SD_ACTIVATION=1
+Restart=on-abort
+PIDFile=@LVMETAD_PIDFILE@
 
 [Install]
 WantedBy=sysinit.target

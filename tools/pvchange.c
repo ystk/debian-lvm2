@@ -19,13 +19,7 @@ static int _pvchange_single(struct cmd_context *cmd, struct volume_group *vg,
 			    struct physical_volume *pv,
 			    void *handle __attribute__((unused)))
 {
-	uint32_t orig_pe_alloc_count;
-	/* FIXME Next three only required for format1. */
-	uint32_t orig_pe_count, orig_pe_size;
-	uint64_t orig_pe_start;
-
 	const char *pv_name = pv_dev_name(pv);
-	const char *orig_vg_name;
 	char uuid[64] __attribute__((aligned(8)));
 
 	int allocatable = 0;
@@ -73,14 +67,14 @@ static int _pvchange_single(struct cmd_context *cmd, struct volume_group *vg,
 
 		/* change allocatability for a PV */
 		if (allocatable && (pv_status(pv) & ALLOCATABLE_PV)) {
-			log_error("Physical volume \"%s\" is already "
-				  "allocatable", pv_name);
+			log_warn("Physical volume \"%s\" is already "
+				 "allocatable.", pv_name);
 			return 1;
 		}
 
 		if (!allocatable && !(pv_status(pv) & ALLOCATABLE_PV)) {
-			log_error("Physical volume \"%s\" is already "
-				  "unallocatable", pv_name);
+			log_warn("Physical volume \"%s\" is already "
+				 "unallocatable.", pv_name);
 			return 1;
 		}
 
@@ -129,28 +123,10 @@ static int _pvchange_single(struct cmd_context *cmd, struct volume_group *vg,
 		if (!id_write_format(&pv->id, uuid, sizeof(uuid)))
 			return 0;
 		log_verbose("Changing uuid of %s to %s.", pv_name, uuid);
-		if (!is_orphan(pv)) {
-			orig_vg_name = pv_vg_name(pv);
-			orig_pe_alloc_count = pv_pe_alloc_count(pv);
-
-			/* FIXME format1 pv_write doesn't preserve these. */
-			orig_pe_size = pv_pe_size(pv);
-			orig_pe_start = pv_pe_start(pv);
-			orig_pe_count = pv_pe_count(pv);
-
-			pv->vg_name = pv->fmt->orphan_vg_name;
-			pv->pe_alloc_count = 0;
-			if (!(pv_write(cmd, pv, 0))) {
-				log_error("pv_write with new uuid failed "
-					  "for %s.", pv_name);
-				return 0;
-			}
-			pv->vg_name = orig_vg_name;
-			pv->pe_alloc_count = orig_pe_alloc_count;
-
-			pv->pe_size = orig_pe_size;
-			pv->pe_start = orig_pe_start;
-			pv->pe_count = orig_pe_count;
+		if (!is_orphan(pv) && (!pv_write(cmd, pv, 1))) {
+			log_error("pv_write with new uuid failed "
+				  "for %s.", pv_name);
+			return 0;
 		}
 	}
 
@@ -168,7 +144,7 @@ static int _pvchange_single(struct cmd_context *cmd, struct volume_group *vg,
 		return 0;
 	}
 
-	log_print("Physical volume \"%s\" changed", pv_name);
+	log_print_unless_silent("Physical volume \"%s\" changed", pv_name);
 
 	return 1;
 }
@@ -185,7 +161,7 @@ int pvchange(struct cmd_context *cmd, int argc, char **argv)
 
 	struct pv_list *pvl;
 	struct dm_list *vgnames;
-	struct str_list *sll;
+	struct dm_str_list *sll;
 
 	if (!(arg_count(cmd, allocatable_ARG) + arg_is_set(cmd, addtag_ARG) +
 	    arg_is_set(cmd, deltag_ARG) + arg_count(cmd, uuid_ARG) +
@@ -201,13 +177,14 @@ int pvchange(struct cmd_context *cmd, int argc, char **argv)
 	}
 
 	if (arg_count(cmd, all_ARG) && argc) {
-		log_error("Option a and PhysicalVolumePath are exclusive");
+		log_error("Option --all and PhysicalVolumePath are exclusive.");
 		return EINVALID_CMD_LINE;
 	}
 
 	if (argc) {
 		log_verbose("Using physical volume(s) on command line");
 		for (; opt < argc; opt++) {
+			total++;
 			pv_name = argv[opt];
 			dm_unescape_colons_and_at_signs(pv_name, NULL, NULL);
 			vg_name = find_vgname_from_pvname(cmd, pv_name);
@@ -224,12 +201,12 @@ int pvchange(struct cmd_context *cmd, int argc, char **argv)
 			}
 			pvl = find_pv_in_vg(vg, pv_name);
 			if (!pvl || !pvl->pv) {
+				unlock_and_release_vg(cmd, vg, vg_name);
 				log_error("Unable to find %s in %s",
 					  pv_name, vg_name);
 				continue;
 			}
 
-			total++;
 			done += _pvchange_single(cmd, vg,
 						 pvl->pv, NULL);
 			unlock_and_release_vg(cmd, vg, vg_name);
@@ -243,10 +220,14 @@ int pvchange(struct cmd_context *cmd, int argc, char **argv)
 		 * take the lock here, pvs with 0 mdas in a non-orphan VG will
 		 * be processed twice.
 		 */
-		if (!lock_vol(cmd, VG_GLOBAL, LCK_VG_WRITE)) {
+		if (!lock_vol(cmd, VG_GLOBAL, LCK_VG_WRITE, NULL)) {
 			log_error("Unable to obtain global lock.");
 			return ECMD_FAILED;
 		}
+
+		/* populate lvmcache */
+		if (!lvmetad_vg_list_to_lvmcache(cmd))
+			stack;
 
 		if ((vgnames = get_vgnames(cmd, 1)) &&
 		    !dm_list_empty(vgnames)) {
@@ -269,10 +250,10 @@ int pvchange(struct cmd_context *cmd, int argc, char **argv)
 		unlock_vg(cmd, VG_GLOBAL);
 	}
 
-	log_print("%d physical volume%s changed / %d physical volume%s "
-		  "not changed",
-		  done, done == 1 ? "" : "s",
-		  total - done, (total - done) == 1 ? "" : "s");
+	log_print_unless_silent("%d physical volume%s changed / %d physical volume%s "
+				"not changed",
+				done, done == 1 ? "" : "s",
+				total - done, (total - done) == 1 ? "" : "s");
 
 	return (total == done) ? ECMD_PROCESSED : ECMD_FAILED;
 }

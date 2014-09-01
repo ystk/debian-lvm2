@@ -21,11 +21,9 @@
 #include "text_export.h"
 #include "text_import.h"
 #include "config.h"
-#include "defaults.h"
 #include "lvm-string.h"
 #include "targets.h"
 #include "activate.h"
-#include "sharedlib.h"
 #include "str_list.h"
 
 #include <sys/utsname.h>
@@ -151,7 +149,6 @@ static int _mirrored_text_export(const struct lv_segment *seg, struct formatter 
 
 #ifdef DEVMAPPER_SUPPORT
 static int _block_on_error_available = 0;
-static unsigned _mirror_attributes = 0;
 
 static struct mirror_state *_mirrored_init_target(struct dm_pool *mem,
 					 struct cmd_context *cmd)
@@ -163,16 +160,13 @@ static struct mirror_state *_mirrored_init_target(struct dm_pool *mem,
 		return NULL;
 	}
 
-	mirr_state->default_region_size = 2 *
-	    find_config_tree_int(cmd,
-			    "activation/mirror_region_size",
-			    DEFAULT_MIRROR_REGION_SIZE);
+	mirr_state->default_region_size = get_default_region_size(cmd);
 
 	return mirr_state;
 }
 
 static int _mirrored_target_percent(void **target_state,
-				    percent_t *percent,
+				    dm_percent_t *percent,
 				    struct dm_pool *mem,
 				    struct cmd_context *cmd,
 				    struct lv_segment *seg, char *params,
@@ -188,7 +182,7 @@ static int _mirrored_target_percent(void **target_state,
 		*target_state = _mirrored_init_target(mem, cmd);
 
 	/* Status line: <#mirrors> (maj:min)+ <synced>/<total_regions> */
-	log_debug("Mirror status: %s", params);
+	log_debug_activation("Mirror status: %s", params);
 
 	if (sscanf(pos, "%u %n", &mirror_count, &used) != 1) {
 		log_error("Failure parsing mirror status mirror count: %s",
@@ -219,7 +213,7 @@ static int _mirrored_target_percent(void **target_state,
 	if (seg)
 		seg->extents_copied = seg->area_len * numerator / denominator;
 
-        *percent = make_percent(numerator, denominator);
+        *percent = dm_make_percent(numerator, denominator);
 
 	return 1;
 }
@@ -289,7 +283,7 @@ static int _mirrored_transient_status(struct lv_segment *seg, char *params)
 				  log->name);
 			return 0;
 		}
-		log_debug("Found mirror log at %d:%d", info.major, info.minor);
+		log_debug_activation("Found mirror log at %d:%d", info.major, info.minor);
 		sprintf(buf, "%d:%d", info.major, info.minor);
 		if (strcmp(buf, log_args[1])) {
 			log_error("Mirror log mismatch. Metadata says %s, kernel says %s.",
@@ -313,11 +307,11 @@ static int _mirrored_transient_status(struct lv_segment *seg, char *params)
 				  seg_lv(seg, i)->name);
 			return 0;
 		}
-		log_debug("Found mirror image at %d:%d", info.major, info.minor);
+		log_debug_activation("Found mirror image at %d:%d", info.major, info.minor);
 		sprintf(buf, "%d:%d", info.major, info.minor);
 		for (j = 0; j < num_devs; ++j) {
 			if (!strcmp(buf, args[j])) {
-			    log_debug("Match: metadata image %d matches kernel image %d", i, j);
+			    log_debug_activation("Match: metadata image %d matches kernel image %d", i, j);
 			    images[j] = seg_lv(seg, i);
 			}
 		}
@@ -361,14 +355,14 @@ static int _add_log(struct dm_pool *mem, struct lv_segment *seg,
 
 	if (seg->log_lv) {
 		/* If disk log, use its UUID */
-		if (!(log_dlid = build_dm_uuid(mem, seg->log_lv->lvid.s, NULL))) {
+		if (!(log_dlid = build_dm_uuid(mem, seg->log_lv, NULL))) {
 			log_error("Failed to build uuid for log LV %s.",
 				  seg->log_lv->name);
 			return 0;
 		}
 	} else {
 		/* If core log, use mirror's UUID and set DM_CORELOG flag */
-		if (!(log_dlid = build_dm_uuid(mem, seg->lv->lvid.s, NULL))) {
+		if (!(log_dlid = build_dm_uuid(mem, seg->lv, NULL))) {
 			log_error("Failed to build uuid for mirror LV %s.",
 				  seg->lv->name);
 			return 0;
@@ -466,13 +460,13 @@ static int _mirrored_target_present(struct cmd_context *cmd,
 {
 	static int _mirrored_checked = 0;
 	static int _mirrored_present = 0;
+	static unsigned _mirror_attributes = 0;
 	uint32_t maj, min, patchlevel;
 	unsigned maj2, min2, patchlevel2;
 	char vsn[80];
-	struct utsname uts;
-	unsigned kmaj, kmin, krel;
 
 	if (!_mirrored_checked) {
+		_mirrored_checked = 1;
 		_mirrored_present = target_present(cmd, "mirror", 1);
 
 		/*
@@ -496,14 +490,16 @@ static int _mirrored_target_present(struct cmd_context *cmd,
 		      sscanf(vsn, "%u.%u.%u", &maj2, &min2, &patchlevel2) == 3 &&
 		      maj2 == 4 && min2 == 5 && patchlevel2 == 0)))	/* RHEL4U3 */
 			_block_on_error_available = 1;
-	}
 
-	/*
-	 * Check only for modules if atttributes requested and no previous check.
-	 * FIXME: Fails incorrectly if cmirror was built into kernel.
-	 */
-	if (attributes) {
-		if (!_mirror_attributes) {
+#ifdef CMIRRORD_PIDFILE
+		/*
+		 * The cluster mirror log daemon must be running,
+		 * otherwise, the kernel module will fail to make
+		 * contact.
+		 */
+		if (cmirrord_is_running()) {
+			struct utsname uts;
+			unsigned kmaj, kmin, krel;
 			/*
 			 * The dm-log-userspace module was added to the
 			 * 2.6.31 kernel.
@@ -512,40 +508,33 @@ static int _mirrored_target_present(struct cmd_context *cmd,
 			    (sscanf(uts.release, "%u.%u.%u", &kmaj, &kmin, &krel) == 3) &&
 			    KERNEL_VERSION(kmaj, kmin, krel) < KERNEL_VERSION(2, 6, 31)) {
 				if (module_present(cmd, "log-clustered"))
-					_mirror_attributes |= MIRROR_LOG_CLUSTERED;
+				_mirror_attributes |= MIRROR_LOG_CLUSTERED;
 			} else if (module_present(cmd, "log-userspace"))
 				_mirror_attributes |= MIRROR_LOG_CLUSTERED;
 
 			if (!(_mirror_attributes & MIRROR_LOG_CLUSTERED))
-				log_verbose("Cluster mirror log module is not available");
-
-			/*
-			 * The cluster mirror log daemon must be running,
-			 * otherwise, the kernel module will fail to make
-			 * contact.
-			 */
-#ifdef CMIRRORD_PIDFILE
-			if (!dm_daemon_is_running(CMIRRORD_PIDFILE)) {
-				log_verbose("Cluster mirror log daemon is not running");
-				_mirror_attributes &= ~MIRROR_LOG_CLUSTERED;
-			}
+				log_verbose("Cluster mirror log module is not available.");
+		} else
+			log_verbose("Cluster mirror log daemon is not running.");
 #else
-			log_verbose("Cluster mirror log daemon not included in build");
-			_mirror_attributes &= ~MIRROR_LOG_CLUSTERED;
+		log_verbose("Cluster mirror log daemon not included in build.");
 #endif
-		}
-		*attributes = _mirror_attributes;
 	}
-	_mirrored_checked = 1;
+
+	/*
+	 * Check only for modules if atttributes requested and no previous check.
+	 * FIXME: Fails incorrectly if cmirror was built into kernel.
+	 */
+	if (attributes)
+		*attributes = _mirror_attributes;
 
 	return _mirrored_present;
 }
 
-#ifdef DMEVENTD
+#  ifdef DMEVENTD
 static const char *_get_mirror_dso_path(struct cmd_context *cmd)
 {
-	return get_monitor_dso_path(cmd, find_config_tree_str(cmd, "dmeventd/mirror_library",
-							      DEFAULT_DMEVENTD_MIRROR_LIB));
+	return get_monitor_dso_path(cmd, find_config_tree_str(cmd, dmeventd_mirror_library_CFG, NULL));
 }
 
 /* FIXME Cache this */
@@ -572,8 +561,7 @@ static int _target_unmonitor_events(struct lv_segment *seg, int events)
 	return _target_set_events(seg, events, 0);
 }
 
-#endif /* DMEVENTD */
-#endif /* DEVMAPPER_SUPPORT */
+#  endif /* DMEVENTD */
 
 static int _mirrored_modules_needed(struct dm_pool *mem,
 				    const struct lv_segment *seg,
@@ -596,6 +584,7 @@ static int _mirrored_modules_needed(struct dm_pool *mem,
 
 	return 1;
 }
+#endif /* DEVMAPPER_SUPPORT */
 
 static void _mirrored_destroy(struct segment_type *segtype)
 {
@@ -613,13 +602,13 @@ static struct segtype_handler _mirrored_ops = {
 	.target_percent = _mirrored_target_percent,
 	.target_present = _mirrored_target_present,
 	.check_transient_status = _mirrored_transient_status,
+	.modules_needed = _mirrored_modules_needed,
 #  ifdef DMEVENTD
 	.target_monitored = _target_registered,
 	.target_monitor_events = _target_monitor_events,
 	.target_unmonitor_events = _target_unmonitor_events,
 #  endif	/* DMEVENTD */
 #endif
-	.modules_needed = _mirrored_modules_needed,
 	.destroy = _mirrored_destroy,
 };
 

@@ -69,11 +69,12 @@ struct dm_task {
 	int expected_errno;
 
 	char *uuid;
+	char *mangled_uuid;
 };
 
 struct cmd_data {
 	const char *name;
-	const int cmd;
+	const unsigned cmd;
 	const int version[3];
 };
 

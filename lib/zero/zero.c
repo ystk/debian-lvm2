@@ -13,17 +13,11 @@
  */
 
 #include "lib.h"
-#include "toolcontext.h"
 #include "segtype.h"
 #include "display.h"
-#include "text_export.h"
-#include "text_import.h"
 #include "config.h"
 #include "str_list.h"
-#include "targets.h"
-#include "lvm-string.h"
 #include "activate.h"
-#include "metadata.h"
 
 static const char *_zero_name(const struct lv_segment *seg)
 {
@@ -65,7 +59,6 @@ static int _zero_target_present(struct cmd_context *cmd,
 
 	return _zero_present;
 }
-#endif
 
 static int _zero_modules_needed(struct dm_pool *mem,
 				const struct lv_segment *seg __attribute__((unused)),
@@ -78,6 +71,7 @@ static int _zero_modules_needed(struct dm_pool *mem,
 
 	return 1;
 }
+#endif
 
 static void _zero_destroy(struct segment_type *segtype)
 {
@@ -90,8 +84,8 @@ static struct segtype_handler _zero_ops = {
 #ifdef DEVMAPPER_SUPPORT
 	.add_target_line = _zero_add_target_line,
 	.target_present = _zero_target_present,
-#endif
 	.modules_needed = _zero_modules_needed,
+#endif
 	.destroy = _zero_destroy,
 };
 

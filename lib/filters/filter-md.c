@@ -14,10 +14,9 @@
  */
 
 #include "lib.h"
-#include "filter-md.h"
-#include "metadata.h"
+#include "filter.h"
 
-#ifdef linux
+#ifdef __linux__
 
 static int _ignore_md(struct dev_filter *f __attribute__((unused)),
 		      struct device *dev)
@@ -30,13 +29,13 @@ static int _ignore_md(struct dev_filter *f __attribute__((unused)),
 	ret = dev_is_md(dev, NULL);
 
 	if (ret == 1) {
-		log_debug("%s: Skipping md component device", dev_name(dev));
+		log_debug_devs("%s: Skipping md component device", dev_name(dev));
 		return 0;
 	}
 
 	if (ret < 0) {
-		log_debug("%s: Skipping: error in md component detection",
-			  dev_name(dev));
+		log_debug_devs("%s: Skipping: error in md component detection",
+			       dev_name(dev));
 		return 0;
 	}
 
@@ -51,11 +50,11 @@ static void _destroy(struct dev_filter *f)
 	dm_free(f);
 }
 
-struct dev_filter *md_filter_create(void)
+struct dev_filter *md_filter_create(struct dev_types *dt)
 {
 	struct dev_filter *f;
 
-	if (!(f = dm_malloc(sizeof(*f)))) {
+	if (!(f = dm_zalloc(sizeof(*f)))) {
 		log_error("md filter allocation failed");
 		return NULL;
 	}
@@ -63,14 +62,16 @@ struct dev_filter *md_filter_create(void)
 	f->passes_filter = _ignore_md;
 	f->destroy = _destroy;
 	f->use_count = 0;
-	f->private = NULL;
+	f->private = dt;
+
+	log_debug_devs("MD filter initialised.");
 
 	return f;
 }
 
 #else
 
-struct dev_filter *md_filter_create(void)
+struct dev_filter *md_filter_create(struct dev_types *dt)
 {
 	return NULL;
 }

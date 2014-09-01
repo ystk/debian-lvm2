@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008,2010 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2008-2013 Red Hat, Inc. All rights reserved.
  *
  * This file is part of LVM2.
  *
@@ -16,12 +16,13 @@
 #include "properties.h"
 #include "lvm_misc.h"
 #include "lvm2app.h"
+#include "lvm_prop.h"
 
 struct dm_list *tag_list_copy(struct dm_pool *p, struct dm_list *tag_list)
 {
 	struct dm_list *list;
 	lvm_str_list_t *lsl;
-	struct str_list *sl;
+	struct dm_str_list *sl;
 
 	if (!(list = dm_pool_zalloc(p, sizeof(*list)))) {
 		log_errno(ENOMEM, "Memory allocation fail for dm_list.");
@@ -46,13 +47,16 @@ struct dm_list *tag_list_copy(struct dm_pool *p, struct dm_list *tag_list)
 }
 
 struct lvm_property_value get_property(const pv_t pv, const vg_t vg,
-				       const lv_t lv, const lvseg_t lvseg,
-				       const pvseg_t pvseg, const char *name)
+				       const lv_t lv,
+				       const lvseg_t lvseg,
+				       const pvseg_t pvseg,
+				       const struct lvcreate_params *lvcp,
+				       const struct pvcreate_params *pvcp,
+				       const char *name)
 {
 	struct lvm_property_type prop;
-	struct lvm_property_value v;
+	struct lvm_property_value v = { 0 };
 
-	memset(&v, 0, sizeof(v));
 	prop.id = name;
 
 	if (pv) {
@@ -69,6 +73,12 @@ struct lvm_property_value get_property(const pv_t pv, const vg_t vg,
 			return v;
 	} else if (pvseg) {
 		if (!pvseg_get_property(pvseg, &prop))
+			return v;
+	} else if (lvcp) {
+		if (!lv_create_param_get_property(lvcp, &prop))
+			return v;
+	} else if (pvcp) {
+		if (!pv_create_param_get_property(pvcp, &prop))
 			return v;
 	} else {
 		log_errno(EINVAL, "Invalid NULL handle passed to library function.");
@@ -88,7 +98,10 @@ struct lvm_property_value get_property(const pv_t pv, const vg_t vg,
 
 
 int set_property(const pv_t pv, const vg_t vg, const lv_t lv,
-		 const char *name, struct lvm_property_value *v)
+		struct lvcreate_params *lvcp,
+		struct pvcreate_params *pvcp,
+		const char *name,
+		struct lvm_property_value *v)
 {
 	struct lvm_property_type prop;
 
@@ -112,6 +125,43 @@ int set_property(const pv_t pv, const vg_t vg, const lv_t lv,
 			v->is_valid = 0;
 			return -1;
 		}
+	} else if (lvcp) {
+		if (!lv_create_param_set_property(lvcp, &prop)) {
+			v->is_valid = 0;
+			return -1;
+		}
+	} else if (pvcp) {
+		if (!pv_create_param_set_property(pvcp, &prop)) {
+			v->is_valid = 0;
+			return -1;
+		}
+	} else {
+		return -1;
 	}
 	return 0;
+}
+
+/*
+ * Store anything that may need to be restored back to the user on library
+ * call exit.  Currently the only thing we are preserving is the users umask.
+ */
+struct saved_env store_user_env(struct cmd_context *cmd)
+{
+	struct saved_env env = {0};
+
+	if (cmd) {
+		env.user_umask = umask(cmd->default_settings.umask);
+	} else {
+		env.user_umask = umask(0);
+		umask(env.user_umask);
+	}
+
+	return env;
+}
+
+void restore_user_env(const struct saved_env *env)
+{
+	if (env) {
+		umask(env->user_umask);
+	}
 }

@@ -22,144 +22,24 @@
 #include "memlock.h"
 #include "defaults.h"
 #include "lvmcache.h"
+#include "lvm-signal.h"
 
 #include <assert.h>
-#include <signal.h>
 #include <sys/stat.h>
 #include <limits.h>
 #include <unistd.h>
 
 static struct locking_type _locking;
-static sigset_t _oldset;
 
 static int _vg_lock_count = 0;		/* Number of locks held */
 static int _vg_write_lock_held = 0;	/* VG write lock held? */
-static int _signals_blocked = 0;
 static int _blocking_supported = 0;
-
-static volatile sig_atomic_t _sigint_caught = 0;
-static volatile sig_atomic_t _handler_installed;
-static struct sigaction _oldhandler;
-static int _oldmasked;
 
 typedef enum {
         LV_NOOP,
         LV_SUSPEND,
         LV_RESUME
 } lv_operation_t;
-
-static void _catch_sigint(int unused __attribute__((unused)))
-{
-	_sigint_caught = 1;
-}
-
-int sigint_caught(void) {
-	return _sigint_caught;
-}
-
-void sigint_clear(void)
-{
-	_sigint_caught = 0;
-}
-
-/*
- * Temporarily allow keyboard interrupts to be intercepted and noted;
- * saves interrupt handler state for sigint_restore().  Users should
- * use the sigint_caught() predicate to check whether interrupt was
- * requested and act appropriately.  Interrupt flags are never
- * cleared automatically by this code, but the tools clear the flag
- * before running each command in lvm_run_command().  All other places
- * where the flag needs to be cleared need to call sigint_clear().
- */
-
-void sigint_allow(void)
-{
-	struct sigaction handler;
-	sigset_t sigs;
-
-	/*
-	 * Do not overwrite the backed-up handler data -
-	 * just increase nesting count.
-	 */
-	if (_handler_installed) {
-		_handler_installed++;
-		return;
-	}
-
-	/* Grab old sigaction for SIGINT: shall not fail. */
-	sigaction(SIGINT, NULL, &handler);
-	handler.sa_flags &= ~SA_RESTART; /* Clear restart flag */
-	handler.sa_handler = _catch_sigint;
-
-	_handler_installed = 1;
-
-	/* Override the signal handler: shall not fail. */
-	sigaction(SIGINT, &handler, &_oldhandler);
-
-	/* Unmask SIGINT.  Remember to mask it again on restore. */
-	sigprocmask(0, NULL, &sigs);
-	if ((_oldmasked = sigismember(&sigs, SIGINT))) {
-		sigdelset(&sigs, SIGINT);
-		sigprocmask(SIG_SETMASK, &sigs, NULL);
-	}
-}
-
-void sigint_restore(void)
-{
-	if (!_handler_installed)
-		return;
-
-	if (_handler_installed > 1) {
-		_handler_installed--;
-		return;
-	}
-
-	/* Nesting count went down to 0. */
-	_handler_installed = 0;
-
-	if (_oldmasked) {
-		sigset_t sigs;
-		sigprocmask(0, NULL, &sigs);
-		sigaddset(&sigs, SIGINT);
-		sigprocmask(SIG_SETMASK, &sigs, NULL);
-	}
-
-	sigaction(SIGINT, &_oldhandler, NULL);
-}
-
-static void _block_signals(uint32_t flags __attribute__((unused)))
-{
-	sigset_t set;
-
-	if (_signals_blocked)
-		return;
-
-	if (sigfillset(&set)) {
-		log_sys_error("sigfillset", "_block_signals");
-		return;
-	}
-
-	if (sigprocmask(SIG_SETMASK, &set, &_oldset)) {
-		log_sys_error("sigprocmask", "_block_signals");
-		return;
-	}
-
-	_signals_blocked = 1;
-}
-
-static void _unblock_signals(void)
-{
-	/* Don't unblock signals while any locks are held */
-	if (!_signals_blocked || _vg_lock_count)
-		return;
-
-	if (sigprocmask(SIG_SETMASK, &_oldset, NULL)) {
-		log_sys_error("sigprocmask", "_block_signals");
-		return;
-	}
-
-	_signals_blocked = 0;
-}
 
 static void _lock_memory(struct cmd_context *cmd, lv_operation_t lv_op)
 {
@@ -177,6 +57,13 @@ static void _unlock_memory(struct cmd_context *cmd, lv_operation_t lv_op)
 
 	if (lv_op == LV_RESUME)
 		critical_section_dec(cmd, "unlocking on resume");
+}
+
+static void _unblock_signals(void)
+{
+	/* Don't unblock signals while any locks are held */
+	if (!_vg_lock_count)
+		unblock_signals();
 }
 
 void reset_locking(void)
@@ -225,10 +112,9 @@ int init_locking(int type, struct cmd_context *cmd, int suppress_messages)
 		suppress_messages = 1;
 
 	if (type < 0)
-		type = find_config_tree_int(cmd, "global/locking_type", 1);
+		type = find_config_tree_int(cmd, global_locking_type_CFG, NULL);
 
-	_blocking_supported = find_config_tree_int(cmd,
-	    "global/wait_for_locks", DEFAULT_WAIT_FOR_LOCKS);
+	_blocking_supported = find_config_tree_bool(cmd, global_wait_for_locks_CFG, NULL);
 
 	switch (type) {
 	case 0:
@@ -255,9 +141,7 @@ int init_locking(int type, struct cmd_context *cmd, int suppress_messages)
 			if (init_external_locking(&_locking, cmd, suppress_messages))
 				return 1;
 		}
-		if (!find_config_tree_int(cmd, "locking/fallback_to_clustered_locking",
-			    find_config_tree_int(cmd, "global/fallback_to_clustered_locking",
-						 DEFAULT_FALLBACK_TO_CLUSTERED_LOCKING))) {
+		if (!find_config_tree_bool(cmd, global_fallback_to_clustered_locking_CFG, NULL)) {
 			log_error_suppress(suppress_messages, "External locking initialisation failed.");
 			break;
 		}
@@ -284,15 +168,18 @@ int init_locking(int type, struct cmd_context *cmd, int suppress_messages)
 			break;
 		return 1;
 
+	case 5:
+		init_dummy_locking(&_locking, cmd, suppress_messages);
+		log_verbose("Locking disabled for read-only access.");
+		return 1;
+
 	default:
 		log_error("Unknown locking type requested.");
 		return 0;
 	}
 
 	if ((type == 2 || type == 3) &&
-	    find_config_tree_int(cmd, "locking/fallback_to_local_locking",
-	    	    find_config_tree_int(cmd, "global/fallback_to_local_locking",
-					 DEFAULT_FALLBACK_TO_LOCAL_LOCKING))) {
+	    find_config_tree_bool(cmd, global_fallback_to_local_locking_CFG, NULL)) {
 		log_warn_suppress(suppress_messages, "WARNING: Falling back to local file-based locking.");
 		log_warn_suppress(suppress_messages,
 				  "Volume Groups with the clustered attribute will "
@@ -357,34 +244,34 @@ int check_lvm1_vg_inactive(struct cmd_context *cmd, const char *vgname)
  * FIXME This should become VG uuid.
  */
 static int _lock_vol(struct cmd_context *cmd, const char *resource,
-		     uint32_t flags, lv_operation_t lv_op)
+		     uint32_t flags, lv_operation_t lv_op, struct logical_volume *lv)
 {
 	uint32_t lck_type = flags & LCK_TYPE_MASK;
 	uint32_t lck_scope = flags & LCK_SCOPE_MASK;
 	int ret = 0;
 
-	_block_signals(flags);
+	block_signals(flags);
 	_lock_memory(cmd, lv_op);
 
 	assert(resource);
 
 	if (!*resource) {
 		log_error(INTERNAL_ERROR "Use of P_orphans is deprecated.");
-		return 0;
+		goto out;
 	}
 
 	if ((is_orphan_vg(resource) || is_global_vg(resource)) && (flags & LCK_CACHE)) {
 		log_error(INTERNAL_ERROR "P_%s referenced", resource);
-		return 0;
+		goto out;
 	}
 
 	if (cmd->metadata_read_only && lck_type == LCK_WRITE &&
 	    strcmp(resource, VG_GLOBAL)) {
 		log_error("Operation prohibited while global/metadata_read_only is set.");
-		return 0;
+		goto out;
 	}
 
-	if ((ret = _locking.lock_resource(cmd, resource, flags))) {
+	if ((ret = _locking.lock_resource(cmd, resource, flags, lv))) {
 		if (lck_scope == LCK_VG && !(flags & LCK_CACHE)) {
 			if (lck_type != LCK_UNLOCK)
 				lvmcache_lock_vgname(resource, lck_type == LCK_READ);
@@ -401,14 +288,14 @@ static int _lock_vol(struct cmd_context *cmd, const char *resource,
 		if (!ret)
 			_update_vg_lock_count(resource, flags);
 	}
-
+out:
 	_unlock_memory(cmd, lv_op);
 	_unblock_signals();
 
 	return ret;
 }
 
-int lock_vol(struct cmd_context *cmd, const char *vol, uint32_t flags)
+int lock_vol(struct cmd_context *cmd, const char *vol, uint32_t flags, struct logical_volume *lv)
 {
 	char resource[258] __attribute__((aligned(8)));
 	lv_operation_t lv_op;
@@ -426,11 +313,13 @@ int lock_vol(struct cmd_context *cmd, const char *vol, uint32_t flags)
 
 
 	if (flags == LCK_NONE) {
-		log_debug(INTERNAL_ERROR "%s: LCK_NONE lock requested", vol);
+		log_debug_locking(INTERNAL_ERROR "%s: LCK_NONE lock requested", vol);
 		return 1;
 	}
 
 	switch (flags & LCK_SCOPE_MASK) {
+	case LCK_ACTIVATION:
+		break;
 	case LCK_VG:
 		if (!_blocking_supported)
 			flags |= LCK_NONBLOCK;
@@ -462,7 +351,7 @@ int lock_vol(struct cmd_context *cmd, const char *vol, uint32_t flags)
 	strncpy(resource, vol, sizeof(resource) - 1);
 	resource[sizeof(resource) - 1] = '\0';
 
-	if (!_lock_vol(cmd, resource, flags, lv_op))
+	if (!_lock_vol(cmd, resource, flags, lv_op, lv))
 		return_0;
 
 	/*
@@ -473,7 +362,7 @@ int lock_vol(struct cmd_context *cmd, const char *vol, uint32_t flags)
 	    (flags & (LCK_CACHE | LCK_HOLD)))
 		return 1;
 
-	if (!_lock_vol(cmd, resource, (flags & ~LCK_TYPE_MASK) | LCK_UNLOCK, lv_op))
+	if (!_lock_vol(cmd, resource, (flags & ~LCK_TYPE_MASK) | LCK_UNLOCK, lv_op, lv))
 		return_0;
 
 	return 1;
@@ -551,7 +440,7 @@ int activate_lv_excl(struct cmd_context *cmd, struct logical_volume *lv)
 	if (!vg_is_clustered(lv->vg))
 		return activate_lv_excl_local(cmd, lv);
 
-	if (lv_is_active_exclusive(lv))
+	if (lv_is_active_exclusive_locally(lv))
 		return 1;
 
 	if (!activate_lv_excl_local(cmd, lv))
@@ -561,10 +450,10 @@ int activate_lv_excl(struct cmd_context *cmd, struct logical_volume *lv)
 		return 1;
 
 	/* FIXME Deal with error return codes. */
-	if (activate_lv_excl_remote(cmd, lv))
-		stack;
+	if (!activate_lv_excl_remote(cmd, lv))
+		return_0;
 
-	return lv_is_active_exclusive(lv);
+	return 1;
 }
 
 /* Lock a list of LVs */
@@ -574,7 +463,7 @@ int activate_lvs(struct cmd_context *cmd, struct dm_list *lvs, unsigned exclusiv
 	struct lv_list *lvl;
 
 	dm_list_iterate_items(lvl, lvs) {
-		if (!exclusive) {
+		if (!exclusive && !lv_is_active_exclusive(lvl->lv)) {
 			if (!activate_lv(cmd, lvl->lv)) {
 				log_error("Failed to activate %s", lvl->lv->name);
 				return 0;
@@ -631,12 +520,12 @@ int sync_local_dev_names(struct cmd_context* cmd)
 {
 	memlock_unlock(cmd);
 
-	return lock_vol(cmd, VG_SYNC_NAMES, LCK_VG_SYNC_LOCAL);
+	return lock_vol(cmd, VG_SYNC_NAMES, LCK_VG_SYNC_LOCAL, NULL);
 }
 
 int sync_dev_names(struct cmd_context* cmd)
 {
 	memlock_unlock(cmd);
 
-	return lock_vol(cmd, VG_SYNC_NAMES, LCK_VG_SYNC);
+	return lock_vol(cmd, VG_SYNC_NAMES, LCK_VG_SYNC, NULL);
 }

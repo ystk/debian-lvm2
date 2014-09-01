@@ -17,9 +17,9 @@
 #include "label.h"
 #include "metadata.h"
 #include "lvmcache.h"
-#include "filter.h"
 #include "xlate.h"
 #include "disk_rep.h"
+#include "toolcontext.h"
 
 #include <assert.h>
 
@@ -52,7 +52,7 @@ static int __read_pool_disk(const struct format_type *fmt, struct device *dev,
 	return 1;
 }
 
-static void _add_pl_to_list(struct dm_list *head, struct pool_list *data)
+static void _add_pl_to_list(struct cmd_context *cmd, struct dm_list *head, struct pool_list *data)
 {
 	struct pool_list *pl;
 
@@ -62,14 +62,14 @@ static void _add_pl_to_list(struct dm_list *head, struct pool_list *data)
 
 			id_write_format(&pl->pv_uuid, uuid, ID_LEN + 7);
 
-			if (!dev_subsystem_part_major(data->dev)) {
+			if (!dev_subsystem_part_major(cmd->dev_types, data->dev)) {
 				log_very_verbose("Ignoring duplicate PV %s on "
 						 "%s", uuid,
 						 dev_name(data->dev));
 				return;
 			}
 			log_very_verbose("Duplicate PV %s - using %s %s",
-					 uuid, dev_subsystem_name(data->dev),
+					 uuid, dev_subsystem_name(cmd->dev_types, data->dev),
 					 dev_name(data->dev));
 			dm_list_del(&pl->list);
 			break;
@@ -91,11 +91,11 @@ int read_pool_label(struct pool_list *pl, struct labeller *l,
 
 	get_pool_pv_uuid(&pvid, pd);
 	id_write_format(&pvid, uuid, ID_LEN + 7);
-	log_debug("Calculated uuid %s for %s", uuid, dev_name(dev));
+	log_debug_metadata("Calculated uuid %s for %s", uuid, dev_name(dev));
 
 	get_pool_vg_uuid(&vgid, pd);
 	id_write_format(&vgid, uuid, ID_LEN + 7);
-	log_debug("Calculated uuid %s for %s", uuid, pd->pl_pool_name);
+	log_debug_metadata("Calculated uuid %s for %s", uuid, pd->pl_pool_name);
 
 	if (!(info = lvmcache_add(l, (char *) &pvid, dev, pd->pl_pool_name,
 				  (char *) &vgid, 0)))
@@ -103,7 +103,7 @@ int read_pool_label(struct pool_list *pl, struct labeller *l,
 	if (label)
 		*label = lvmcache_get_label(info);
 
-	lvmcache_set_device_size(info, xlate32_be(pd->pl_blocks) << SECTOR_SHIFT);
+	lvmcache_set_device_size(info, ((uint64_t)xlate32_be(pd->pl_blocks)) << SECTOR_SHIFT);
 	lvmcache_del_mdas(info);
 	lvmcache_make_valid(info);
 
@@ -242,7 +242,7 @@ struct _read_pool_pv_baton {
 	struct dm_list *head;
 	const char *vgname;
 	uint32_t *sp_devs;
-	int sp_count;
+	uint32_t sp_count;
 	int failed;
 	int empty;
 };
@@ -288,7 +288,7 @@ static int _read_pool_pv(struct lvmcache_info *info, void *baton)
 	if (b->sp_count != b->pl->pd.pl_subpools)
 		return 0;
 
-	_add_pl_to_list(b->head, b->pl);
+	_add_pl_to_list(lvmcache_fmt(info)->cmd, b->head, b->pl);
 
 	if (b->sp_count > b->pl->pd.pl_sp_id && b->sp_devs[b->pl->pd.pl_sp_id] == 0)
 		b->sp_devs[b->pl->pd.pl_sp_id] = b->pl->pd.pl_sp_devs;
@@ -369,8 +369,8 @@ int read_pool_pds(const struct format_type *fmt, const char *vg_name,
 
 		full_scan++;
 		if (full_scan > 1) {
-			log_debug("No devices for vg %s found in cache",
-				  vg_name);
+			log_debug_metadata("No devices for vg %s found in cache",
+					   vg_name);
 			return 0;
 		}
 		lvmcache_label_scan(fmt->cmd, full_scan);

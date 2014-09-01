@@ -43,6 +43,7 @@ SOURCES =\
 	pvscan.c \
 	reporter.c \
 	segtypes.c \
+	tags.c \
 	toollib.c \
 	vgcfgbackup.c \
 	vgcfgrestore.c \
@@ -117,12 +118,12 @@ CFLOW_TARGET = lvm
 
 include $(top_builddir)/make.tmpl
 
-LIBS += $(UDEV_LIBS)
-
 device-mapper: $(TARGETS_DM)
 
+CFLAGS_dmsetup.o += $(UDEV_CFLAGS) $(EXTRA_EXEC_CFLAGS)
+
 dmsetup: dmsetup.o $(top_builddir)/libdm/libdevmapper.$(LIB_SUFFIX)
-	$(CC) $(CFLAGS) $(LDFLAGS) -L$(top_builddir)/libdm \
+	$(CC) $(CFLAGS) $(LDFLAGS) $(EXTRA_EXEC_LDFLAGS) -L$(top_builddir)/libdm \
 	      -o $@ dmsetup.o -ldevmapper $(LIBS)
 
 dmsetup.static: dmsetup.o $(interfacebuilddir)/libdevmapper.a
@@ -131,9 +132,15 @@ dmsetup.static: dmsetup.o $(interfacebuilddir)/libdevmapper.a
 
 all: device-mapper
 
+CFLAGS_lvm.o += $(EXTRA_EXEC_CFLAGS)
+
 lvm: $(OBJECTS) lvm.o $(top_builddir)/lib/liblvm-internal.a
-	$(CC) $(CFLAGS) $(LDFLAGS) $(ELDFLAGS) -o $@ $(OBJECTS) lvm.o \
+	$(CC) $(CFLAGS) $(LDFLAGS) $(EXTRA_EXEC_LDFLAGS) $(ELDFLAGS) -o $@ $(OBJECTS) lvm.o \
 		$(LVMLIBS) $(READLINE_LIBS) $(LIBS) -rdynamic
+
+ifeq ("@BUILD_LVMETAD@", "yes")
+lvm: $(top_builddir)/libdaemon/client/libdaemonclient.a
+endif
 
 lvm.static: $(OBJECTS) lvm-static.o $(top_builddir)/lib/liblvm-internal.a  $(interfacebuilddir)/libdevmapper.a
 	$(CC) $(CFLAGS) $(LDFLAGS) -static -L$(interfacebuilddir) -o $@ \
@@ -158,7 +165,7 @@ liblvm2cmd.$(LIB_SUFFIX).$(LIB_VERSION): liblvm2cmd.$(LIB_SUFFIX)
 
 .commands: $(srcdir)/commands.h $(srcdir)/cmdnames.h Makefile
 	$(CC) -E -P $(srcdir)/cmdnames.h 2> /dev/null | \
-		egrep -v '^ *(|#.*|dumpconfig|formats|help|pvdata|segtypes|version) *$$' > .commands
+		egrep -v '^ *(|#.*|devtypes|dumpconfig|formats|help|pvdata|segtypes|tags|version) *$$' > .commands
 
 ifneq ("$(CFLOW_CMD)", "")
 CFLOW_SOURCES = $(addprefix $(srcdir)/, $(SOURCES))

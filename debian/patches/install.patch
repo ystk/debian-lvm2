@@ -1,10 +1,21 @@
 --- a/make.tmpl.in
 +++ b/make.tmpl.in
-@@ -17,9 +17,10 @@
+@@ -17,20 +17,10 @@
  
  @SET_MAKE@
  
+-# Allow environment to override any built-in default value for CC.
+-# If there is a built-in default, CC is NOT set to @CC@ here.
 -CC ?= @CC@
+-
+-# If $(CC) holds the usual built-in default value of 'cc' then replace it with
+-# the configured value.
+-# (To avoid this and force the use of 'cc' from the environment, supply its
+-# full path.)
+-ifeq ($(CC), cc)
+-  CC = @CC@
+-endif
+-
 +CC = @CC@
  RANLIB = @RANLIB@
  INSTALL = @INSTALL@
@@ -12,17 +23,17 @@
  MKDIR_P = @MKDIR_P@
  MSGFMT = @MSGFMT@
  LCOV = @LCOV@
-@@ -71,8 +72,7 @@
- tmpfiles_dir = $(DESTDIR)@tmpfilesdir@
+@@ -91,8 +81,7 @@
  ocf_scriptdir = $(DESTDIR)@OCFDIR@
+ pyexecdir = $(DESTDIR)$(prefix)
  
 -USRLIB_RELPATH = $(shell echo $(abspath $(usrlibdir) $(libdir)) | \
 -  $(AWK) -f $(top_srcdir)/scripts/relpath.awk)
 +USRLIB_RELPATH = @libdir@/
  
+ SYSTEMD_GENERATOR_DIR = @systemdutildir@/system-generators
  DEFAULT_SYS_DIR = @DEFAULT_SYS_DIR@
- DEFAULT_ARCHIVE_DIR = $(DEFAULT_SYS_DIR)/@DEFAULT_ARCHIVE_SUBDIR@
-@@ -96,22 +96,14 @@
+@@ -119,22 +108,14 @@
  endif
  
  # Handle installation of files
@@ -49,7 +60,7 @@
  
  .SUFFIXES: .c .d .o .so .a .po .pot .mo .dylib
  
-@@ -344,17 +336,14 @@
+@@ -389,17 +370,14 @@
  	$(INSTALL_DIR) $(usrlibdir)
  	$(LN_S) -f $(USRLIB_RELPATH)$(<F).$(LIB_VERSION) $(usrlibdir)/$(<F)
  
@@ -72,14 +83,15 @@
  $(LIB_STATIC): $(OBJECTS)
 --- a/daemons/dmeventd/plugins/mirror/Makefile.in
 +++ b/daemons/dmeventd/plugins/mirror/Makefile.in
-@@ -30,6 +30,7 @@
+@@ -17,7 +17,7 @@
+ top_builddir = @top_builddir@
  
- include $(top_builddir)/make.tmpl
+ INCLUDES += -I$(top_srcdir)/daemons/dmeventd/plugins/lvm2
+-CLDFLAGS += -L$(top_builddir)/daemons/dmeventd/plugins/lvm2
++CLDFLAGS += -L$(top_builddir)/daemons/dmeventd/plugins/lvm2 -Wl,-rpath,'$$ORIGIN'
  
-+CLDFLAGS += -Wl,-rpath,'$$ORIGIN'
- LIBS += -ldevmapper-event-lvm2 -ldevmapper $(DAEMON_LIBS)
+ SOURCES = dmeventd_mirror.c
  
- install_lvm2: install_dm_plugin
 --- a/daemons/dmeventd/plugins/raid/Makefile.in
 +++ b/daemons/dmeventd/plugins/raid/Makefile.in
 @@ -29,6 +29,7 @@
@@ -92,14 +104,15 @@
  install_lvm2: install_dm_plugin
 --- a/daemons/dmeventd/plugins/snapshot/Makefile.in
 +++ b/daemons/dmeventd/plugins/snapshot/Makefile.in
-@@ -26,6 +26,7 @@
+@@ -17,7 +17,7 @@
+ top_builddir = @top_builddir@
  
- include $(top_builddir)/make.tmpl
+ INCLUDES += -I$(top_srcdir)/daemons/dmeventd/plugins/lvm2
+-CLDFLAGS += -L$(top_builddir)/daemons/dmeventd/plugins/lvm2
++CLDFLAGS += -L$(top_builddir)/daemons/dmeventd/plugins/lvm2 -Wl,-rpath,'$$ORIGIN'
  
-+CLDFLAGS += -Wl,-rpath,'$$ORIGIN'
- LIBS += -ldevmapper-event-lvm2 -ldevmapper $(DAEMON_LIBS)
+ SOURCES = dmeventd_snapshot.c
  
- install_lvm2: install_dm_plugin
 --- a/daemons/dmeventd/plugins/thin/Makefile.in
 +++ b/daemons/dmeventd/plugins/thin/Makefile.in
 @@ -29,6 +29,7 @@
@@ -114,7 +127,7 @@
 +++ b/daemons/dmeventd/plugins/lvm2/Makefile.in
 @@ -26,6 +26,6 @@
  
- LIBS += @LVM2CMD_LIB@ -ldevmapper $(PTHREAD_LIBS) $(DAEMON_LIBS)
+ LIBS += @LVM2CMD_LIB@ -ldevmapper $(PTHREAD_LIBS)
  
 -install_lvm2: install_lib_shared
 +install_lvm2: install_dm_lib

@@ -17,11 +17,19 @@
 #define _LVM_TEXT_LAYOUT_H
 
 #include "config.h"
-#include "lvm-types.h"
 #include "metadata.h"
 #include "uuid.h"
 
 /* disk_locn and data_area_list are defined in format-text.h */
+
+#define PV_HEADER_EXTENSION_VSN 1
+
+struct pv_header_extension {
+	uint32_t version;
+	uint32_t flags;
+	/* NULL-terminated list of bootloader areas */
+	struct disk_locn bootloader_areas_xl[0];
+} __attribute__ ((packed));
 
 /* Fields with the suffix _xl should be xlate'd wherever they appear */
 /* On disk */

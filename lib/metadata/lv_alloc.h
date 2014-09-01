@@ -16,6 +16,8 @@
 #ifndef _LVM_LV_ALLOC_H
 #define _LVM_LV_ALLOC_H
 
+#include "metadata-exported.h"
+
 struct lv_segment *alloc_lv_segment(const struct segment_type *segtype,
 				    struct logical_volume *lv,
 				    uint32_t le, uint32_t len,
@@ -40,8 +42,9 @@ int set_lv_segment_area_lv(struct lv_segment *seg, uint32_t area_num,
 			   uint64_t status);
 int move_lv_segment_area(struct lv_segment *seg_to, uint32_t area_to,
 			 struct lv_segment *seg_from, uint32_t area_from);
-void release_lv_segment_area(struct lv_segment *seg, uint32_t s,
-			     uint32_t area_reduction);
+int release_lv_segment_area(struct lv_segment *seg, uint32_t s,
+			    uint32_t area_reduction);
+int release_and_discard_lv_segment_area(struct lv_segment *seg, uint32_t s, uint32_t area_reduction);
 
 struct alloc_handle;
 struct alloc_handle *allocate_extents(struct volume_group *vg,
@@ -51,7 +54,7 @@ struct alloc_handle *allocate_extents(struct volume_group *vg,
                                       uint32_t mirrors, uint32_t log_count,
 				      uint32_t log_region_size, uint32_t extents,
                                       struct dm_list *allocatable_pvs,
-				      alloc_policy_t alloc,
+				      alloc_policy_t alloc, int approx_alloc,
 				      struct dm_list *parallel_areas);
 
 int lv_add_segment(struct alloc_handle *ah,
@@ -65,6 +68,9 @@ int lv_add_segment(struct alloc_handle *ah,
 int lv_add_mirror_areas(struct alloc_handle *ah,
 			struct logical_volume *lv, uint32_t le,
 			uint32_t region_size);
+int lv_add_segmented_mirror_image(struct alloc_handle *ah,
+				  struct logical_volume *lv, uint32_t le,
+				  uint32_t region_size);
 int lv_add_mirror_lvs(struct logical_volume *lv,
 		      struct logical_volume **sub_lvs,
 		      uint32_t num_extra_areas,
@@ -80,6 +86,7 @@ int lv_add_virtual_segment(struct logical_volume *lv, uint64_t status,
 void alloc_destroy(struct alloc_handle *ah);
 
 struct dm_list *build_parallel_areas_from_lv(struct logical_volume *lv,
-					     unsigned use_pvmove_parent_lv);
+					     unsigned use_pvmove_parent_lv,
+					     unsigned create_single_list);
 
 #endif

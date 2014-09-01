@@ -66,15 +66,19 @@ int vgextend(struct cmd_context *cmd, int argc, char **argv)
 		return EINVALID_CMD_LINE;
 	}
 
-	if (arg_count(cmd, restoremissing_ARG))
-		cmd->handles_missing_pvs = 1;
+	/*
+	 * It is always ok to add new PVs to a VG - even if there are
+	 * missing PVs.  No LVs are affected by this operation, but
+	 * repair processes - particularly for RAID segtypes - can
+	 * be facilitated.
+	 */
+	cmd->handles_missing_pvs = 1;
 
 	log_verbose("Checking for volume group \"%s\"", vg_name);
 	vg = vg_read_for_update(cmd, vg_name, NULL, 0);
 	if (vg_read_error(vg)) {
 		release_vg(vg);
-		stack;
-		return ECMD_FAILED;
+		return_ECMD_FAILED;
 	}
 
 	if (!archive(vg))
@@ -87,10 +91,10 @@ int vgextend(struct cmd_context *cmd, int argc, char **argv)
 		}
 		if (!fixed) {
 			log_error("No PV has been restored.");
-			goto_bad;
+			goto bad;
 		}
 	} else { /* no --restore, normal vgextend */
-		if (!lock_vol(cmd, VG_ORPHANS, LCK_VG_WRITE)) {
+		if (!lock_vol(cmd, VG_ORPHANS, LCK_VG_WRITE, NULL)) {
 			log_error("Can't get lock for orphan PVs");
 			unlock_and_release_vg(cmd, vg, vg_name);
 			return ECMD_FAILED;
@@ -98,12 +102,12 @@ int vgextend(struct cmd_context *cmd, int argc, char **argv)
 
 		if (arg_count(cmd, metadataignore_ARG) &&
 		    (vg_mda_copies(vg) != VGMETADATACOPIES_UNMANAGED) &&
-		    (pp.force == PROMPT) &&
+		    (pp.force == PROMPT) && !pp.yes &&
 		    yes_no_prompt("Override preferred number of copies "
-			  "of VG %s metadata? [y/n]: ",
+				  "of VG %s metadata? [y/n]: ",
 				  vg_name) == 'n') {
 			log_error("Volume group %s not changed", vg_name);
-			goto_bad;
+			goto bad;
 		}
 
 		/* extend vg */
@@ -129,7 +133,7 @@ int vgextend(struct cmd_context *cmd, int argc, char **argv)
 		goto_bad;
 
 	backup(vg);
-	log_print("Volume group \"%s\" successfully extended", vg_name);
+	log_print_unless_silent("Volume group \"%s\" successfully extended", vg_name);
 	r = ECMD_PROCESSED;
 
 bad:

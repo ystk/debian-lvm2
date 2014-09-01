@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <ctype.h>
+#include <stdarg.h>
 
 #define SECTION_B_CHAR '{'
 #define SECTION_E_CHAR '}'
@@ -50,10 +51,11 @@ struct parser {
 	struct dm_pool *mem;
 };
 
-struct output_line {
+struct config_output {
 	struct dm_pool *mem;
 	dm_putline_fn putline;
-	void *putline_baton;
+	const struct dm_config_node_out_spec *spec;
+	void *baton;
 };
 
 static void _get_token(struct parser *p, int tok_prev);
@@ -77,7 +79,7 @@ static const int sep = '/';
 		  p->tb - p->fb + 1, p->line); \
       return 0;\
    } \
-} while(0);
+} while(0)
 
 static int _tok_match(const char *str, const char *b, const char *e)
 {
@@ -104,10 +106,8 @@ struct dm_config_tree *dm_config_create(void)
 		dm_pool_destroy(mem);
 		return 0;
 	}
-	cft->root = NULL;
-	cft->cascade = NULL;
-	cft->custom = NULL;
 	cft->mem = mem;
+
 	return cft;
 }
 
@@ -189,9 +189,9 @@ struct dm_config_tree *dm_config_from_string(const char *config_settings)
 	return cft;
 }
 
-static int _line_start(struct output_line *outline)
+static int _line_start(struct config_output *out)
 {
-	if (!dm_pool_begin_object(outline->mem, 128)) {
+	if (!dm_pool_begin_object(out->mem, 128)) {
 		log_error("dm_pool_begin_object failed for config line");
 		return 0;
 	}
@@ -200,7 +200,7 @@ static int _line_start(struct output_line *outline)
 }
 
 __attribute__ ((format(printf, 2, 3)))
-static int _line_append(struct output_line *outline, const char *fmt, ...)
+static int _line_append(struct config_output *out, const char *fmt, ...)
 {
 	char buf[4096];
 	va_list ap;
@@ -215,7 +215,7 @@ static int _line_append(struct output_line *outline, const char *fmt, ...)
 		return 0;
 	}
 
-	if (!dm_pool_grow_object(outline->mem, &buf[0], strlen(buf))) {
+	if (!dm_pool_grow_object(out->mem, &buf[0], strlen(buf))) {
 		log_error("dm_pool_grow_object failed for config line");
 		return 0;
 	}
@@ -223,38 +223,38 @@ static int _line_append(struct output_line *outline, const char *fmt, ...)
 	return 1;
 }
 
-#define line_append(args...) do {if (!_line_append(outline, args)) {return_0;}} while (0)
+#define line_append(args...) do {if (!_line_append(out, args)) {return_0;}} while (0)
 
-static int _line_end(struct output_line *outline)
+static int _line_end(const struct dm_config_node *cn, struct config_output *out)
 {
 	const char *line;
 
-	if (!dm_pool_grow_object(outline->mem, "\0", 1)) {
+	if (!dm_pool_grow_object(out->mem, "\0", 1)) {
 		log_error("dm_pool_grow_object failed for config line");
 		return 0;
 	}
 
-	line = dm_pool_end_object(outline->mem);
+	line = dm_pool_end_object(out->mem);
 
-	if (!outline->putline)
+	if (!out->putline && !out->spec)
 		return 0;
 
-	outline->putline(line, outline->putline_baton);
+	if (out->putline)
+		out->putline(line, out->baton);
+
+	if (out->spec && out->spec->line_fn)
+		out->spec->line_fn(cn, line, out->baton);
 
 	return 1;
 }
 
-static int _write_value(struct output_line *outline, const struct dm_config_value *v)
+static int _write_value(struct config_output *out, const struct dm_config_value *v)
 {
 	char *buf;
 
 	switch (v->type) {
 	case DM_CFG_STRING:
-		if (!(buf = alloca(dm_escaped_len(v->v.str)))) {
-			log_error("temporary stack allocation for a config "
-				  "string failed");
-			return 0;
-		}
+		buf = alloca(dm_escaped_len(v->v.str));
 		line_append("\"%s\"", dm_escape_double_quotes(buf, v->v.str));
 		break;
 
@@ -279,11 +279,12 @@ static int _write_value(struct output_line *outline, const struct dm_config_valu
 }
 
 static int _write_config(const struct dm_config_node *n, int only_one,
-			 struct output_line *outline, int level)
+			 struct config_output *out, int level)
 {
 	char space[MAX_INDENT + 1];
 	int l = (level < MAX_INDENT) ? level : MAX_INDENT;
 	int i;
+	char *escaped_key = NULL;
 
 	if (!n)
 		return 1;
@@ -293,16 +294,26 @@ static int _write_config(const struct dm_config_node *n, int only_one,
 	space[i] = '\0';
 
 	do {
-		if (!_line_start(outline))
+		if (out->spec && out->spec->prefix_fn)
+			out->spec->prefix_fn(n, space, out->baton);
+
+		if (!_line_start(out))
 			return_0;
-		line_append("%s%s", space, n->key);
+		if (strchr(n->key, '#') || strchr(n->key, '"') || strchr(n->key, '!')) {
+			escaped_key = alloca(dm_escaped_len(n->key) + 2);
+			*escaped_key = '"';
+			dm_escape_double_quotes(escaped_key + 1, n->key);
+			strcat(escaped_key, "\"");
+		}
+		line_append("%s%s", space, escaped_key ? escaped_key : n->key);
+		escaped_key = NULL;
 		if (!n->v) {
 			/* it's a sub section */
 			line_append(" {");
-			if (!_line_end(outline))
+			if (!_line_end(n, out))
 				return_0;
-			_write_config(n->child, 0, outline, level + 1);
-			if (!_line_start(outline))
+			_write_config(n->child, 0, out, level + 1);
+			if (!_line_start(out))
 				return_0;
 			line_append("%s}", space);
 		} else {
@@ -312,7 +323,7 @@ static int _write_config(const struct dm_config_node *n, int only_one,
 			if (v->next) {
 				line_append("[");
 				while (v && v->type != DM_CFG_EMPTY_ARRAY) {
-					if (!_write_value(outline, v))
+					if (!_write_value(out, v))
 						return_0;
 					v = v->next;
 					if (v && v->type != DM_CFG_EMPTY_ARRAY)
@@ -320,36 +331,92 @@ static int _write_config(const struct dm_config_node *n, int only_one,
 				}
 				line_append("]");
 			} else
-				if (!_write_value(outline, v))
+				if (!_write_value(out, v))
 					return_0;
 		}
-		if (!_line_end(outline))
+		if (!_line_end(n, out))
 			return_0;
+
+		if (out->spec && out->spec->suffix_fn)
+			out->spec->suffix_fn(n, space, out->baton);
+
 		n = n->sib;
 	} while (n && !only_one);
 	/* FIXME: add error checking */
 	return 1;
 }
 
-int dm_config_write_node(const struct dm_config_node *cn, dm_putline_fn putline, void *baton)
+static int _write_node(const struct dm_config_node *cn, int only_one,
+		       dm_putline_fn putline,
+		       const struct dm_config_node_out_spec *out_spec,
+		       void *baton)
 {
-	struct output_line outline;
-	if (!(outline.mem = dm_pool_create("config_line", 1024)))
+	struct config_output out = {
+		.mem = dm_pool_create("config_output", 1024),
+		.putline = putline,
+		.spec = out_spec,
+		.baton = baton
+	};
+
+	if (!out.mem)
 		return_0;
-	outline.putline = putline;
-	outline.putline_baton = baton;
-	if (!_write_config(cn, 0, &outline, 0)) {
-		dm_pool_destroy(outline.mem);
+
+	if (!_write_config(cn, only_one, &out, 0)) {
+		dm_pool_destroy(out.mem);
 		return_0;
 	}
-	dm_pool_destroy(outline.mem);
+	dm_pool_destroy(out.mem);
 	return 1;
 }
 
+int dm_config_write_one_node(const struct dm_config_node *cn, dm_putline_fn putline, void *baton)
+{
+	return _write_node(cn, 1, putline, NULL, baton);
+}
+
+int dm_config_write_node(const struct dm_config_node *cn, dm_putline_fn putline, void *baton)
+{
+	return _write_node(cn, 0, putline, NULL, baton);
+}
+
+int dm_config_write_one_node_out(const struct dm_config_node *cn,
+				 const struct dm_config_node_out_spec *out_spec,
+				 void *baton)
+{
+	return _write_node(cn, 1, NULL, out_spec, baton);
+}
+
+int dm_config_write_node_out(const struct dm_config_node *cn,
+			     const struct dm_config_node_out_spec *out_spec,
+			     void *baton)
+{
+	return _write_node(cn, 0, NULL, out_spec, baton);
+}
 
 /*
  * parser
  */
+static char *_dup_string_tok(struct parser *p)
+{
+	char *str;
+
+	p->tb++, p->te--;	/* strip "'s */
+
+	if (p->te < p->tb) {
+		log_error("Parse error at byte %" PRIptrdiff_t " (line %d): "
+			  "expected a string token.",
+			  p->tb - p->fb + 1, p->line);
+		return NULL;
+	}
+
+	if (!(str = _dup_tok(p)))
+		return_NULL;
+
+	p->te++;
+
+	return str;
+}
+
 static struct dm_config_node *_file(struct parser *p)
 {
 	struct dm_config_node *root = NULL, *n, *l = NULL;
@@ -370,16 +437,40 @@ static struct dm_config_node *_file(struct parser *p)
 static struct dm_config_node *_section(struct parser *p)
 {
 	/* IDENTIFIER SECTION_B_CHAR VALUE* SECTION_E_CHAR */
+
 	struct dm_config_node *root, *n, *l = NULL;
+	char *str;
+
 	if (!(root = _create_node(p->mem))) {
 		log_error("Failed to allocate section node");
 		return NULL;
 	}
 
-	if (!(root->key = _dup_tok(p)))
-		return_NULL;
+	if (p->t == TOK_STRING_ESCAPED) {
+		if (!(str = _dup_string_tok(p)))
+			return_NULL;
+		dm_unescape_double_quotes(str);
+		root->key = str;
 
-	match(TOK_IDENTIFIER);
+		match(TOK_STRING_ESCAPED);
+	} else if (p->t == TOK_STRING) {
+		if (!(str = _dup_string_tok(p)))
+			return_NULL;
+		root->key = str;
+
+		match(TOK_STRING);
+	} else {
+		if (!(root->key = _dup_tok(p)))
+			return_NULL;
+
+		match(TOK_IDENTIFIER);
+	}
+
+	if (!strlen(root->key)) {
+		log_error("Parse error at byte %" PRIptrdiff_t " (line %d): empty section identifier",
+			  p->tb - p->fb + 1, p->line);
+		return NULL;
+	}
 
 	if (p->t == TOK_SECTION_B) {
 		match(TOK_SECTION_B);
@@ -470,22 +561,19 @@ static struct dm_config_value *_type(struct parser *p)
 	case TOK_STRING:
 		v->type = DM_CFG_STRING;
 
-		p->tb++, p->te--;	/* strip "'s */
-		if (!(v->v.str = _dup_tok(p)))
+		if (!(v->v.str = _dup_string_tok(p)))
 			return_NULL;
-		p->te++;
+
 		match(TOK_STRING);
 		break;
 
 	case TOK_STRING_ESCAPED:
 		v->type = DM_CFG_STRING;
 
-		p->tb++, p->te--;	/* strip "'s */
-		if (!(str = _dup_tok(p)))
+		if (!(str = _dup_string_tok(p)))
 			return_NULL;
 		dm_unescape_double_quotes(str);
 		v->v.str = str;
-		p->te++;
 		match(TOK_STRING_ESCAPED);
 		break;
 
@@ -724,12 +812,12 @@ static const struct dm_config_node *_find_config_node(const void *start,
 		if (cn_found && *e)
 			cn = cn_found->child;
 		else
-			break;	/* don't move into the last node */
+			return cn_found;
 
 		path = e;
 	}
 
-	return cn_found;
+	return NULL;
 }
 
 static const struct dm_config_node *_find_first_config_node(const void *start, const char *path)
@@ -842,21 +930,28 @@ static int _find_config_bool(const void *start, node_lookup_fn find,
 {
 	const struct dm_config_node *n = find(start, path);
 	const struct dm_config_value *v;
+	int b;
 
-	if (!n)
-		return fail;
+	if (n) {
+		v = n->v;
 
-	v = n->v;
+		switch (v->type) {
+		case DM_CFG_INT:
+			b = v->v.i ? 1 : 0;
+			log_very_verbose("Setting %s to %d", path, b);
+			return b;
 
-	switch (v->type) {
-	case DM_CFG_INT:
-		return v->v.i ? 1 : 0;
-
-	case DM_CFG_STRING:
-		return _str_to_bool(v->v.str, fail);
-	default:
-		;
+		case DM_CFG_STRING:
+			b = _str_to_bool(v->v.str, fail);
+			log_very_verbose("Setting %s to %d", path, b);
+			return b;
+		default:
+			;
+		}
 	}
+
+	log_very_verbose("%s not found in config: defaulting to %d",
+			 path, fail);
 
 	return fail;
 }
@@ -891,6 +986,20 @@ float dm_config_find_float(const struct dm_config_node *cn, const char *path,
 int dm_config_find_bool(const struct dm_config_node *cn, const char *path, int fail)
 {
 	return _find_config_bool(cn, _find_config_node, path, fail);
+}
+
+int dm_config_value_is_bool(const struct dm_config_value *v) {
+	if (!v)
+		return 0;
+
+	switch(v->type) {
+		case DM_CFG_INT:
+			return 1;
+		case DM_CFG_STRING:
+			return _str_to_bool(v->v.str, -1) != -1;
+		default:
+			return 0;
+	}
 }
 
 /***********************************
@@ -1152,14 +1261,9 @@ struct dm_config_node *dm_config_create_node(struct dm_config_tree *cft, const c
 		log_error("Failed to create config node's key.");
 		return NULL;
 	}
-	if (!(cn->v = _create_value(cft->mem))) {
-		log_error("Failed to create config node's value.");
-		return NULL;
-	}
 	cn->parent = NULL;
-	cn->v->type = DM_CFG_INT;
-	cn->v->v.i = 0;
-	cn->v->next = NULL;
+	cn->v = NULL;
+
 	return cn;
 }
 

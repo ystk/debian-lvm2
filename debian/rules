@@ -46,13 +46,10 @@ endif
 CONFIGURE += \
 	--prefix=/usr \
 	--exec-prefix= \
+	--sbindir=/sbin \
 	--mandir=\$${prefix}/share/man \
 	--infodir=\$${prefix}/share/info \
 	--with-confdir=\$${exec_prefix}/etc
-
-ifneq (,$(findstring $(DEB_HOST_ARCH), arm armeb hppa mips mipsel))
-CONFIGURE_FLAGS += --disable-o_direct
-endif
 
 source: $(STAMPS_DIR)/source
 
@@ -76,7 +73,9 @@ $(STAMPS_DIR)/setup_deb: $(STAMPS_DIR)/source
 	cd $(DIR); \
 	$(CONFIGURE) \
 		--libdir=\$${exec_prefix}/lib/$(DEB_HOST_MULTIARCH) \
+		--with-usrlibdir=\$${prefix}/lib/$(DEB_HOST_MULTIARCH) \
 		--with-optimisation="$(CFLAGS_OPT_DEB)" \
+		--with-cache=internal \
 		--with-clvmd=cman,corosync,openais \
 		--with-cluster=internal \
 		--with-device-uid=0 \
@@ -84,11 +83,17 @@ $(STAMPS_DIR)/setup_deb: $(STAMPS_DIR)/source
 		--with-device-mode=0660 \
 		--with-default-run-dir=/run/lvm \
 		--with-default-locking-dir=/run/lock/lvm \
+		--with-thin=internal \
+		--with-thin-check=/usr/sbin/thin_check \
+		--with-thin-dump=/usr/sbin/thin_dump \
+		--with-thin-repair=/usr/sbin/thin_repair \
 		--enable-applib \
 		--enable-cmdlib \
 		--enable-dmeventd \
+		--enable-lvmetad \
 		--enable-pkgconfig \
 		--enable-readline \
+		--enable-udev_rules \
 		--enable-udev_sync
 	touch $@
 
@@ -138,6 +143,7 @@ $(STAMPS_DIR)/install_%: $(STAMPS_DIR)/build_%
 	dh_testroot
 	rm -rf $(INSTALL_DIR)
 	+$(MAKE_REAL) -C $(DIR) install DESTDIR=$(CURDIR)/$(INSTALL_DIR) LIB_VERSION_DM=$(DEVMAPPER_ABINAME)
+	+$(MAKE_REAL) -C $(DIR)/scripts install_systemd_units install_tmpfiles_configuration DESTDIR=$(CURDIR)/$(INSTALL_DIR)
 	touch $@
 
 install-base-prep:
@@ -151,6 +157,7 @@ install-base:
 	dh_installdebconf
 	dh_installdocs
 	dh_installexamples
+	dh_link
 	dh_strip
 	dh_compress
 	dh_fixperms
@@ -235,7 +242,9 @@ install_lvm2: export DH_OPTIONS = -plvm2
 install_lvm2: DIR = $(BUILD_DIR)/install_deb
 install_lvm2: $(STAMPS_DIR)/install_deb
 	+$(MAKE_SELF) install-base-prep INSTALL_DIR='$(DIR)'
+	dh_systemd_enable
 	dh_installinit --no-start -- start 26 S .
+	dh_systemd_start --no-start
 	+$(MAKE_SELF) install-base
 
 install_lvm2-udeb: export DH_OPTIONS = -plvm2-udeb

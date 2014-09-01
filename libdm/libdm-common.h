@@ -21,14 +21,16 @@
 #define DM_DEFAULT_NAME_MANGLING_MODE_ENV_VAR_NAME "DM_DEFAULT_NAME_MANGLING_MODE"
 
 #define DEV_NAME(dmt) (dmt->mangled_dev_name ? : dmt->dev_name)
+#define DEV_UUID(DMT) (dmt->mangled_uuid ? : dmt->uuid)
 
-int mangle_name(const char *str, size_t len, char *buf,
-		size_t buf_len, dm_string_mangling_t mode);
+int mangle_string(const char *str, const char *str_name, size_t len,
+		  char *buf, size_t buf_len, dm_string_mangling_t mode);
 
-int unmangle_name(const char *str, size_t len, char *buf,
-		  size_t buf_len, dm_string_mangling_t mode);
+int unmangle_string(const char *str, const char *str_name, size_t len,
+		    char *buf, size_t buf_len, dm_string_mangling_t mode);
 
-int check_multiple_mangled_name_allowed(dm_string_mangling_t mode, const char *name);
+int check_multiple_mangled_string_allowed(const char *str, const char *str_name,
+					  dm_string_mangling_t mode);
 
 struct target *create_target(uint64_t start,
 			     uint64_t len,

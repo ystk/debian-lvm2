@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2001-2004 Sistina Software, Inc. All rights reserved.
- * Copyright (C) 2004-2011 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2004-2013 Red Hat, Inc. All rights reserved.
  *
  * This file is part of LVM2.
  *
@@ -15,11 +15,12 @@
 #ifndef _LVM_VG_H
 #define _LVM_VG_H
 
+#include "uuid.h"
+#include "libdevmapper.h"
+
 struct cmd_context;
-struct dm_pool;
 struct format_instance;
-struct dm_list;
-struct id;
+struct logical_volume;
 
 typedef enum {
 	ALLOC_INVALID,
@@ -48,7 +49,19 @@ struct volume_group {
 	uint32_t cmd_missing_vgs;/* Flag marks missing VG */
 	uint32_t seqno;		/* Metadata sequence number */
 
+	/*
+	 * The parsed on-disk copy of this VG; is NULL if this is the on-disk
+	 * version (i.e. vg_ondisk == NULL *implies* this is the on-disk copy,
+	 * there is no guarantee that if this VG is the same as the on-disk one
+	 * this will be NULL). The pointer is maintained by calls to
+	 * _vg_update_vg_ondisk.
+	 */
+	struct volume_group *vg_ondisk;
+	struct dm_config_tree *cft_precommitted; /* Precommitted metadata */
+	struct volume_group *vg_precommitted; /* Parsed from cft */
+
 	alloc_policy_t alloc;
+	struct profile *profile;
 	uint64_t status;
 
 	struct id id;
@@ -111,6 +124,7 @@ struct volume_group {
 	uint32_t mda_copies; /* target number of mdas for this VG */
 
 	struct dm_hash_table *hostnames; /* map of creation hostnames */
+	struct logical_volume *pool_metadata_spare_lv; /* one per VG */
 };
 
 struct volume_group *alloc_vg(const char *pool_name, struct cmd_context *cmd,
@@ -145,6 +159,7 @@ uint32_t vg_mda_count(const struct volume_group *vg);
 uint32_t vg_mda_used_count(const struct volume_group *vg);
 uint32_t vg_mda_copies(const struct volume_group *vg);
 int vg_set_mda_copies(struct volume_group *vg, uint32_t mda_copies);
+char *vg_profile_dup(const struct volume_group *vg);
 
 /*
  * Returns visible LV count - number of LVs from user perspective

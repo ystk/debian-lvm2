@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008,2009,2010 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2008-2013 Red Hat, Inc. All rights reserved.
  *
  * This file is part of LVM2.
  *
@@ -84,19 +84,13 @@ const char *lvm_library_get_version(void);
 /******************************** structures ********************************/
 
 /**
- * Opaque structures - do not use directly.  Internal structures may change
- * without notice between releases, whereas this API will be changed much less
- * frequently.  Backwards compatibility will normally be preserved in future
- * releases.  On any occasion when the developers do decide to break backwards
- * compatibility in any significant way, the LVM_LIBAPI number (included in
- * the library's soname) will be incremented.
+ * Opaque C pointers - Internal structures may change without notice between
+ * releases, whereas this API will be changed much less frequently.  Backwards
+ * compatibility will normally be preserved in future releases.  On any occasion
+ * when the developers do decide to break backwards compatibility in any
+ * significant way, the LVM_LIBAPI number (included in the library's soname)
+ * will be incremented.
  */
-struct lvm;
-struct physical_volume;
-struct volume_group;
-struct logical_volume;
-struct lv_segment;
-struct pv_segment;
 
 /**
  * \class lvm_t
@@ -151,6 +145,22 @@ typedef struct lv_segment *lvseg_t;
  * This pv segment object is bound to a pv_t.
  */
 typedef struct pv_segment *pvseg_t;
+
+/**
+ * \class lv_create_params
+ *
+ * This lv_create_params represents the plethora of available options when
+ * creating a logical volume
+ */
+typedef struct lvm_lv_create_params *lv_create_params_t;
+
+/**
+ * \class pv_create_params
+ *
+ * This pv_create_params represents the plethora of available options when
+ * creating a physical volume
+ */
+typedef struct lvm_pv_create_params *pv_create_params_t;
 
 /**
  * Logical Volume object list.
@@ -301,6 +311,28 @@ int lvm_config_reload(lvm_t libh);
  * 0 (success) or -1 (failure).
  */
 int lvm_config_override(lvm_t libh, const char *config_string);
+
+/**
+ * Find a boolean value in the LVM configuration.
+ *
+ * \memberof lvm_t
+ *
+ * This function finds a boolean value associated with a path
+ * in current LVM configuration.
+ *
+ * \param   libh
+ * Handle obtained from lvm_init().
+ *
+ * \param   config_path
+ * A path in LVM configuration
+ *
+ * \param   fail
+ * Value to return if the path is not found.
+ *
+ * \return
+ * boolean value for 'config_path' (success) or the value of 'fail' (error)
+ */
+int lvm_config_find_bool(lvm_t libh, const char *config_path, int fail);
 
 /**
  * Return stored error no describing last LVM API error.
@@ -471,6 +503,21 @@ vg_t lvm_vg_open(lvm_t libh, const char *vgname, const char *mode,
 		  uint32_t flags);
 
 /**
+ * Validate a name to be used for new VG construction.
+ *
+ * This function checks that the name has no invalid characters,
+ * the length doesn't exceed maximum and that the VG name isn't already in use
+ * and that the name adheres to any other limitations.
+ *
+ * \param libh
+ * Valid library handle
+ *
+ * \param name
+ * Name to validate for new VG create.
+ */
+int lvm_vg_name_validate(lvm_t libh, const char *vg_name);
+
+/**
  * Create a VG with default parameters.
  *
  * \memberof lvm_t
@@ -510,6 +557,112 @@ vg_t lvm_vg_create(lvm_t libh, const char *vg_name);
  * If no LVs exist on the given VG, NULL is returned.
  */
 struct dm_list *lvm_vg_list_lvs(vg_t vg);
+
+/**
+ * Return a list of PV handles for all.
+ *
+ * \memberof lvm_t
+ *
+ * \param   libh
+ * Library handle retrieved from lvm_init
+ *
+ * \return
+ * A list of lvm_pv_list structures containing pv handles for all physical
+ * volumes. If no PVs exist or a global lock was unable to be obtained a
+ * NULL is returned.  Do not attempt to remove one of the PVs until after the
+ * call to lvm_list_pvs_free has been made.
+ */
+struct dm_list *lvm_list_pvs(lvm_t libh);
+
+/**
+ * Free the resources used by acquiring the pvlist.  This should be called as
+ * soon as possible after processing the needed information from the pv list as
+ * a global lock is held.
+ *
+ * \param	pvlist
+ * PV list to be freed
+ *
+ * \return
+ * 0 on success, else -1 with library errno and text set.
+ */
+int lvm_list_pvs_free(struct dm_list *pvlist);
+
+/**
+ *  Create a physical volume.
+ *  \param	libh	Library handle
+ *  \param	pv_name	The physical volume name
+ *  \param	size	Size of physical volume, 0 = use all available.
+ *  \return
+ *  0 on success, else -1 with library errno and text set.
+ */
+int lvm_pv_create(lvm_t libh, const char *pv_name, uint64_t size);
+
+/**
+ * Create a physical volume parameter object for PV creation.
+ *
+ * \param	libh	Library handle
+ * \param	pv_name	Device name
+ *
+ * \return
+ * NULL on error, else valid parameter object to use.
+ */
+pv_create_params_t lvm_pv_params_create(lvm_t libh, const char *pv_name);
+
+/**
+ * Create a parameter object to use in function lvm_pv_create_adv
+ *
+ * 	\param 	params	The params object to get property value from
+ * 	\param	name	The name of the property to retrieve
+ *
+ * 	Available properties:
+ *
+ * 	size					zero indicates use detected size of device
+ * 							(recommended and default)
+ *	pvmetadatacopies		Number of metadata copies (0,1,2)
+ *	pvmetadatasize			The approx. size to be to be set aside for metadata
+ *	data_alignment			Align the start of the data to a multiple of
+ *							this number
+ *	data_alignment_offset	Shift the start of the data area by this addl.
+ *							offset
+ *	zero					Set to 1 to zero out first 2048 bytes of
+ *							device, 0 to not (default is 1)
+ *
+ * 	\return
+ * 	lvm_property_value
+ */
+struct lvm_property_value lvm_pv_params_get_property(
+						const pv_create_params_t params,
+						const char *name);
+
+/**
+ * Sets a property of a PV parameter create object.
+ *
+ * \param	params		The parameter object
+ * \param	name		The name of the property to set (see get prop list)
+ * \param	prop		The property to set the value on.
+ */
+int lvm_pv_params_set_property(pv_create_params_t params, const char *name,
+								struct lvm_property_value *prop);
+/**
+ * Creates a physical volume using the supplied params object.
+ *
+ * \param	params		The parameters to use for physical volume creation
+ *
+ * \return
+ * -1 on error, 0 on success.
+ */
+int lvm_pv_create_adv(pv_create_params_t params);
+
+/**
+ *  Remove a physical volume.
+ *  Note: You cannot remove a PV while iterating through the list of PVs as
+ *  locks are held for the PV list.
+ *  \param	libh	Library handle
+ *  \param	pv_name	The physical volume name
+ *  \return
+ *  0 on success, else -1 with library errno and text set.
+ */
+int lvm_pv_remove(lvm_t libh, const char *pv_name);
 
 /**
  * Return a list of PV handles for a given VG handle.
@@ -1135,6 +1288,38 @@ const char *lvm_lv_get_uuid(const lv_t lv);
 const char *lvm_lv_get_name(const lv_t lv);
 
 /**
+ * Get the attributes of a logical volume.
+ *
+ * \memberof lv_t
+ *
+ * The memory allocated for the name is tied to the vg_t handle and will be
+ * released when lvm_vg_close() is called.
+ *
+ * \param   lv
+ * Logical volume handle.
+ *
+ * \return
+ * Copy of the attributes for the logical volume
+ */
+const char *lvm_lv_get_attr(const lv_t lv);
+
+/**
+ * Get the origin of a snapshot.
+ *
+ * \memberof lv_t
+ *
+ * The memory allocated for the name is tied to the vg_t handle and will be
+ * released when lvm_vg_close() is called.
+ *
+ * \param   lv
+ * Logical volume handle.
+ *
+ * \return
+ * Null if the logical volume is not a snapshot, else origin name.
+ */
+const char *lvm_lv_get_origin(const lv_t lv);
+
+/**
  * Get the current size in bytes of a logical volume.
  *
  * \memberof lv_t
@@ -1321,13 +1506,27 @@ int lvm_lv_remove_tag(lv_t lv, const char *tag);
  */
 struct dm_list *lvm_lv_get_tags(const lv_t lv);
 
+/**
+ * Rename logical volume to new_name.
+ *
+ * \memberof lv_t
+ *
+ * \param   lv
+ * Logical volume handle.
+ *
+ * \param   new_name
+ * New name of logical volume.
+ *
+ * \return
+ * 0 (success) or -1 (failure).
+ *
+ */
+int lvm_lv_rename(lv_t lv, const char *new_name);
 
 /**
  * Resize logical volume to new_size bytes.
  *
  * \memberof lv_t
- *
- * NOTE: This function is currently not implemented.
  *
  * \param   lv
  * Logical volume handle.
@@ -1340,6 +1539,186 @@ struct dm_list *lvm_lv_get_tags(const lv_t lv);
  *
  */
 int lvm_lv_resize(const lv_t lv, uint64_t new_size);
+
+/**
+ * Create a snapshot of a logical volume
+ *
+ * \memberof lv_t
+ *
+ * \param   lv
+ * Logical volume handle.
+ *
+ * \param   snap_name
+ * Name of the snapshot.
+ *
+ * \param   max_snap_size
+ * Max snapshot space to use. If you pass zero the same amount of space as
+ * the origin will be used.
+ *
+ * \return
+ * Valid lv pointer on success, else NULL on error.
+ *
+ */
+lv_t lvm_lv_snapshot(const lv_t lv, const char *snap_name, uint64_t max_snap_size);
+
+/**
+ * Validate a name to be used for LV creation.
+ *
+ * Validates that the name does not contain any invalid characters, max length
+ * and that the LV name doesn't already exist for this VG.
+ *
+ * Note: You can have the same LV name in different VGs, thus the reason this
+ * function requires that you specify a VG to check against.
+ *
+ * \param lv
+ * Volume group handle.
+ *
+ * \param name
+ * Name to validate
+ */
+int lvm_lv_name_validate(const vg_t vg, const char *lv_name);
+
+/**
+ * Thin provisioning discard policies
+ */
+typedef enum {
+	LVM_THIN_DISCARDS_IGNORE,
+	LVM_THIN_DISCARDS_NO_PASSDOWN,
+	LVM_THIN_DISCARDS_PASSDOWN,
+} lvm_thin_discards_t;
+
+/**
+ * Create a thinpool parameter passing object for the specified VG
+ *
+ * \param   vg
+ * Volume Group handle.
+ *
+ * \param   pool_name
+ * Name of the pool.
+ *
+ * \param   size
+ * size of the pool
+ *
+ * \param   chunk_size
+ * data block size of the pool
+ * Default value is DEFAULT_THIN_POOL_CHUNK_SIZE * 2 when 0 passed as chunk_size
+ * DM_THIN_MIN_DATA_BLOCK_SIZE < chunk_size < DM_THIN_MAX_DATA_BLOCK_SIZE
+ *
+ * \param meta_size
+ * Size of thin pool's metadata logical volume. Allowed range is 2MB-16GB.
+ * Default value (ie if 0) pool size / pool chunk size * 64
+ *
+ * \param discard
+ * Thin discard policy
+ * Note: THIN_DISCARDS_PASSDOWN is the default.
+ *
+ * \return
+ * Valid lv_create_params pointer on success, else NULL on error.
+ * Note: Memory is associated with the vg, it will get reclaimed when vg is
+ * closed.
+ *
+ */
+lv_create_params_t lvm_lv_params_create_thin_pool(vg_t vg,
+		const char *pool_name, uint64_t size, uint32_t chunk_size,
+		uint64_t meta_size, lvm_thin_discards_t discard);
+
+#define lvm_lv_params_create_thin_pool_default(vg, pool_name, size) \
+			lvm_lv_params_create_thin_pool((vg), (pool_name), (size), 0, 0, \
+			LVM_THIN_DISCARDS_PASSDOWN)
+
+/**
+ * Creates the snapshot parameter passing object for the specified lv.
+ *
+ * \param	lv
+ * The logical volume to snapshot
+ *
+ * \param	snap_name
+ * Name of snapshot
+ *
+ * \param	max_snap_size
+ * Used for old snap shots max size, set to zero for thinp
+ *
+ * \return
+ * Valid lv_create_params pointer on success, else NULL on error.
+ * Note: Memory is associated with the vg, it will get reclaimed when vg is
+ * closed.
+ */
+lv_create_params_t lvm_lv_params_create_snapshot(const lv_t lv,
+													const char *snap_name,
+													uint64_t max_snap_size);
+/**
+ * Get the specific value of a lv create parameter by name
+ *
+ * \param	params		lv create parameters
+ *
+ * \param	name		name of parameter
+ *
+ * \return
+ * lvm_property_value structure that will contain the current
+ * value of the property.  Caller should check 'is_valid' flag before using
+ * the value.  If 'is_valid' is not set, caller should check lvm_errno()
+ * for specific error.
+ */
+struct lvm_property_value lvm_lv_params_get_property(
+											const lv_create_params_t params,
+											const char *name);
+
+
+/**
+ * Set the specific value of a lv create parameter by name
+ *
+ * Note that the property must be a 'settable' property, as evidenced '
+ * by the 'is_settable' flag when querying the property.
+ *
+ * The memory allocated for a string property value is tied to the vg_t
+ * handle associated with the lv_create_params_t and will be released when
+ * lvm_vg_close() is called.
+ *
+ * \param	params		lv create parameters
+ *
+ * \param	name		name of parameter
+ *
+ * \param	prop		Property value to use for setting
+ *
+ * \return
+ * 0 on success, -1 on error.
+ */
+int lvm_lv_params_set_property(lv_create_params_t params,
+								const char *name,
+								struct lvm_property_value *prop);
+
+/**
+ * Create a thin LV creation parameters in a given VG & thin pool
+ *
+ * \param   vg
+ * Volume Group handle.
+ *
+ * \param   pool_name
+ * Name of the pool.
+ *
+ * \param lvname
+ * Name of the LV to create
+ *
+ * \param   size
+ * Size of logical volume
+ *
+ * \return
+ * Valid lv_create_params pointer on success, else NULL on error.
+ * Note: Memory is associated with the vg, it will get reclaimed when vg is
+ * closed.
+ *
+ */
+lv_create_params_t lvm_lv_params_create_thin(const vg_t vg, const char *pool_name,
+									const char *lvname, uint64_t size);
+/**
+ * Create the actual logical volume.
+ *
+ * \param	params		The parameters object for lv creation
+ *
+ * \return
+ * Valid lv pointer on success, else NULL on error.
+ */
+lv_t lvm_lv_create(lv_create_params_t params);
 
 /************************** physical volume handling ************************/
 
@@ -1449,7 +1828,7 @@ uint64_t lvm_pv_get_free(const pv_t pv);
  * The memory allocated for a string property value is tied to the vg_t handle
  * and will be released when lvm_vg_close() is called. For "percent" values
  * (those obtained for copy_percent and snap_percent properties), please see
- * percent_range_t and lvm_percent_to_float().
+ * dm_percent_range_t and lvm_percent_to_float().
  *
  * Example:
  *      lvm_property_value value;
@@ -1567,8 +1946,6 @@ pv_t lvm_pv_from_uuid(vg_t vg, const char *uuid);
  *
  * \memberof pv_t
  *
- * NOTE: This function is currently not implemented.
- *
  * \param   pv
  * Physical volume handle.
  *
@@ -1580,24 +1957,13 @@ pv_t lvm_pv_from_uuid(vg_t vg, const char *uuid);
  */
 int lvm_pv_resize(const pv_t pv, uint64_t new_size);
 
-#ifndef _LVM_PERCENT_H
+#define PERCENT_0 DM_PERCENT_0
+#define PERCENT_1 DM_PERCENT_1
+#define PERCENT_100 DM_PERCENT_100
+#define PERCENT_INVALID DM_PERCENT_INVALID
+#define PERCENT_MERGE_FAILED DM_PERCENT_FAILED
 
-/**
- * This type defines a couple of special percent values. The PERCENT_0 and
- * PERCENT_100 constants designate *exact* percentages: values are never
- * rounded to either of these two.
- */
-typedef enum {
-	PERCENT_0 = 0,
-	PERCENT_1 = 1000000,
-	PERCENT_100 = 100 * PERCENT_1,
-	PERCENT_INVALID = -1,
-	PERCENT_MERGE_FAILED = -2
-} percent_range_t;
-
-typedef int32_t percent_t;
-
-#endif
+typedef dm_percent_t percent_t;
 
 /**
  * Convert a (fixed-point) value obtained from the percent-denominated

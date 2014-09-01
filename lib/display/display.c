@@ -20,6 +20,9 @@
 #include "toolcontext.h"
 #include "segtype.h"
 #include "defaults.h"
+#include "lvm-signal.h"
+
+#include <stdarg.h>
 
 #define SIZE_BUF 128
 
@@ -39,98 +42,7 @@ static const struct {
 	ALLOC_INHERIT, "inherit", 'i'}
 };
 
-static const int _num_policies = sizeof(_policies) / sizeof(*_policies);
-
-uint64_t units_to_bytes(const char *units, char *unit_type)
-{
-	char *ptr = NULL;
-	uint64_t v;
-	double custom_value = 0;
-	uint64_t multiplier;
-
-	if (isdigit(*units)) {
-		custom_value = strtod(units, &ptr);
-		if (ptr == units)
-			return 0;
-		v = (uint64_t) strtoull(units, NULL, 10);
-		if ((double) v == custom_value)
-			custom_value = 0;	/* Use integer arithmetic */
-		units = ptr;
-	} else
-		v = 1;
-
-	/* Only one units char permitted. */
-	if (units[0] && units[1])
-		return 0;
-
-	if (v == 1)
-		*unit_type = *units;
-	else
-		*unit_type = 'U';
-
-	switch (*units) {
-	case 'h':
-	case 'H':
-		multiplier = v = UINT64_C(1);
-		*unit_type = *units;
-		break;
-	case 'b':
-	case 'B':
-		multiplier = UINT64_C(1);
-		break;
-#define KILO UINT64_C(1024)
-	case 's':
-	case 'S':
-		multiplier = (KILO/2);
-		break;
-	case 'k':
-		multiplier = KILO;
-		break;
-	case 'm':
-		multiplier = KILO * KILO;
-		break;
-	case 'g':
-		multiplier = KILO * KILO * KILO;
-		break;
-	case 't':
-		multiplier = KILO * KILO * KILO * KILO;
-		break;
-	case 'p':
-		multiplier = KILO * KILO * KILO * KILO * KILO;
-		break;
-	case 'e':
-		multiplier = KILO * KILO * KILO * KILO * KILO * KILO;
-		break;
-#undef KILO
-#define KILO UINT64_C(1000)
-	case 'K':
-		multiplier = KILO;
-		break;
-	case 'M':
-		multiplier = KILO * KILO;
-		break;
-	case 'G':
-		multiplier = KILO * KILO * KILO;
-		break;
-	case 'T':
-		multiplier = KILO * KILO * KILO * KILO;
-		break;
-	case 'P':
-		multiplier = KILO * KILO * KILO * KILO * KILO;
-		break;
-	case 'E':
-		multiplier = KILO * KILO * KILO * KILO * KILO * KILO;
-		break;
-#undef KILO
-	default:
-		return 0;
-	}
-
-	if (custom_value)
-		return (uint64_t) (custom_value * multiplier);
-	else
-		return v * multiplier;
-}
+static const int _num_policies = DM_ARRAY_SIZE(_policies);
 
 char alloc_policy_char(alloc_policy_t alloc)
 {
@@ -174,11 +86,24 @@ alloc_policy_t get_alloc_from_string(const char *str)
 	return ALLOC_INVALID;
 }
 
+static const char *_percent_types[7] = { "NONE", "VGS", "FREE", "LVS", "PVS", "ORIGIN" };
+
+const char *get_percent_string(percent_type_t def)
+{
+	return _percent_types[def];
+}
+
+const char *display_lvname(const struct logical_volume *lv)
+{
+	/* On allocation failure, just return the LV name. */
+	return lv_fullname_dup(lv->vg->cmd->mem, lv) ? : lv->name;
+}
+
 #define BASE_UNKNOWN 0
 #define BASE_SHARED 1
-#define BASE_1024 7
-#define BASE_1000 13
-#define BASE_SPECIAL 19
+#define BASE_1024 8
+#define BASE_1000 15
+#define BASE_SPECIAL 21
 #define NUM_UNIT_PREFIXES 6
 #define NUM_SPECIAL 3
 
@@ -203,27 +128,29 @@ static const char *_display_size(const struct cmd_context *cmd,
 		{" Gigabyte", " GB", "G"},	/* [4] */
 		{" Megabyte", " MB", "M"},	/* [5] */
 		{" Kilobyte", " KB", "K"},	/* [6] */
+		{" Byte    ", " B", "B"},	/* [7] */
 
 		/* BASE_1024 - Used if cmd->si_unit_consistency = 1 */
-		{" Exbibyte", " EiB", "e"},	/* [7] */
-		{" Pebibyte", " PiB", "p"},	/* [8] */
-		{" Tebibyte", " TiB", "t"},	/* [9] */
-		{" Gibibyte", " GiB", "g"},	/* [10] */
-		{" Mebibyte", " MiB", "m"},	/* [11] */
-		{" Kibibyte", " KiB", "k"},	/* [12] */
+		{" Exbibyte", " EiB", "e"},	/* [8] */
+		{" Pebibyte", " PiB", "p"},	/* [9] */
+		{" Tebibyte", " TiB", "t"},	/* [10] */
+		{" Gibibyte", " GiB", "g"},	/* [11] */
+		{" Mebibyte", " MiB", "m"},	/* [12] */
+		{" Kibibyte", " KiB", "k"},	/* [13] */
+		{" Byte    ", " B", "b"},	/* [14] */
 
 		/* BASE_1000 - Used if cmd->si_unit_consistency = 1 */
-		{" Exabyte",  " EB", "E"},	/* [13] */
-		{" Petabyte", " PB", "P"},	/* [14] */
-		{" Terabyte", " TB", "T"},	/* [15] */
-		{" Gigabyte", " GB", "G"},	/* [16] */
-		{" Megabyte", " MB", "M"},	/* [17] */
-		{" Kilobyte", " kB", "K"},	/* [18] */
+		{" Exabyte",  " EB", "E"},	/* [15] */
+		{" Petabyte", " PB", "P"},	/* [16] */
+		{" Terabyte", " TB", "T"},	/* [17] */
+		{" Gigabyte", " GB", "G"},	/* [18] */
+		{" Megabyte", " MB", "M"},	/* [19] */
+		{" Kilobyte", " kB", "K"},	/* [20] */
 
 		/* BASE_SPECIAL */
-		{" Byte    ", " B ", "B"},	/* [19] */
-		{" Units   ", " Un", "U"},	/* [20] */
-		{" Sectors ", " Se", "S"},	/* [21] */
+		{" Byte    ", " B ", "B"},	/* [21] (shared with BASE_1000) */
+		{" Units   ", " Un", "U"},	/* [22] */
+		{" Sectors ", " Se", "S"},	/* [23] */
 	};
 
 	if (!(size_buf = dm_pool_alloc(cmd->mem, SIZE_BUF))) {
@@ -302,7 +229,7 @@ static const char *_display_size(const struct cmd_context *cmd,
 	}
 
 	/* FIXME Make precision configurable */
-	switch(toupper((int) cmd->current_settings.unit_type)) {
+	switch (toupper(*size_str[base + s][SIZE_UNIT])) {
 	case 'B':
 	case 'S':
 		precision = 0;
@@ -345,7 +272,7 @@ void pvdisplay_colons(const struct physical_volume *pv)
 	}
 
 	log_print("%s:%s:%" PRIu64 ":-1:%" PRIu64 ":%" PRIu64 ":-1:%" PRIu32 ":%u:%u:%u:%s",
-		  pv_dev_name(pv), pv->vg_name, pv->size,
+		  pv_dev_name(pv), pv_vg_name(pv), pv->size,
 		  /* FIXME pv->pv_number, Derive or remove? */
 		  pv->status,	/* FIXME Support old or new format here? */
 		  pv->status & ALLOCATABLE_PV,	/* FIXME remove? */
@@ -506,11 +433,11 @@ int lvdisplay_full(struct cmd_context *cmd,
 	struct lv_segment *snap_seg = NULL, *mirror_seg = NULL;
 	struct lv_segment *seg = NULL;
 	int lvm1compat;
-	percent_t snap_percent;
+	dm_percent_t snap_percent;
 	int thin_data_active = 0, thin_metadata_active = 0;
-	percent_t thin_data_percent, thin_metadata_percent;
+	dm_percent_t thin_data_percent, thin_metadata_percent;
 	int thin_active = 0;
-	percent_t thin_percent;
+	dm_percent_t thin_percent;
 
 	if (!id_write_format(&lv->lvid.id[1], uuid, sizeof(uuid)))
 		return_0;
@@ -526,8 +453,7 @@ int lvdisplay_full(struct cmd_context *cmd,
 
 	log_print("--- Logical volume ---");
 
-	lvm1compat = find_config_tree_int(cmd, "global/lvdisplay_shows_full_device_path",
-					  DEFAULT_LVDISPLAY_SHOWS_FULL_DEVICE_PATH);
+	lvm1compat = find_config_tree_bool(cmd, global_lvdisplay_shows_full_device_path_CFG, NULL);
 
 	if (lvm1compat)
 		/* /dev/vgname/lvname doen't actually exist for internal devices */
@@ -557,7 +483,7 @@ int lvdisplay_full(struct cmd_context *cmd,
 			if (inkernel &&
 			    (snap_active = lv_snapshot_percent(snap_seg->cow,
 							       &snap_percent)))
-				if (snap_percent == PERCENT_INVALID)
+				if (snap_percent == DM_PERCENT_INVALID)
 					snap_active = 0;
 			if (lvm1compat)
 				log_print("                       %s%s/%s [%s]",
@@ -570,11 +496,11 @@ int lvdisplay_full(struct cmd_context *cmd,
 					  snap_active ? "active" : "INACTIVE");
 		}
 		snap_seg = NULL;
-	} else if ((snap_seg = find_cow(lv))) {
+	} else if ((snap_seg = find_snapshot(lv))) {
 		if (inkernel &&
 		    (snap_active = lv_snapshot_percent(snap_seg->cow,
 						       &snap_percent)))
-			if (snap_percent == PERCENT_INVALID)
+			if (snap_percent == DM_PERCENT_INVALID)
 				snap_active = 0;
 
 		if (lvm1compat)
@@ -594,27 +520,31 @@ int lvdisplay_full(struct cmd_context *cmd,
 		if (seg->origin)
 			log_print("LV Thin origin name    %s",
 				  seg->origin->name);
+		if (seg->external_lv)
+			log_print("LV External origin name %s",
+				  seg->external_lv->name);
+		if (seg->merge_lv)
+			log_print("LV merging to          %s",
+				  seg->merge_lv->name);
 		if (inkernel)
 			thin_active = lv_thin_percent(lv, 0, &thin_percent);
+		if (lv_is_merging_origin(lv))
+			log_print("LV merged with         %s",
+				  find_snapshot(lv)->lv->name);
 	} else if (lv_is_thin_pool(lv)) {
-		if (inkernel) {
+		if (lv_info(cmd, lv, 1, &info, 1, 1) && info.exists) {
 			thin_data_active = lv_thin_pool_percent(lv, 0, &thin_data_percent);
 			thin_metadata_active = lv_thin_pool_percent(lv, 1, &thin_metadata_percent);
 		}
 		/* FIXME: display thin_pool targets transid for activated LV as well */
 		seg = first_seg(lv);
-		log_print("LV Pool transaction ID %" PRIu64, seg->transaction_id);
 		log_print("LV Pool metadata       %s", seg->metadata_lv->name);
 		log_print("LV Pool data           %s", seg_lv(seg, 0)->name);
-		log_print("LV Pool chunk size     %s",
-			  display_size(cmd, seg->chunk_size));
-		log_print("LV Zero new blocks     %s",
-			  seg->zero_new_blocks ? "yes" : "no");
 	}
 
 	if (inkernel && info.suspended)
 		log_print("LV Status              suspended");
-	else
+	else if (activation())
 		log_print("LV Status              %savailable",
 			  inkernel ? "" : "NOT ");
 
@@ -631,15 +561,15 @@ int lvdisplay_full(struct cmd_context *cmd,
 
 	if (thin_data_active)
 		log_print("Allocated pool data    %.2f%%",
-			  percent_to_float(thin_data_percent));
+			  dm_percent_to_float(thin_data_percent));
 
 	if (thin_metadata_active)
 		log_print("Allocated metadata     %.2f%%",
-			  percent_to_float(thin_metadata_percent));
+			  dm_percent_to_float(thin_metadata_percent));
 
 	if (thin_active)
 		log_print("Mapped size            %.2f%%",
-			  percent_to_float(thin_percent));
+			  dm_percent_to_float(thin_percent));
 
 	log_print("Current LE             %u",
 		  snap_seg ? snap_seg->origin->le_count : lv->le_count);
@@ -651,7 +581,7 @@ int lvdisplay_full(struct cmd_context *cmd,
 
 		if (snap_active)
 			log_print("Allocated to snapshot  %.2f%%",
-				  percent_to_float(snap_percent));
+				  dm_percent_to_float(snap_percent));
 
 		log_print("Snapshot chunk size    %s",
 			  display_size(cmd, (uint64_t) snap_seg->chunk_size));
@@ -733,10 +663,15 @@ int lvdisplay_segments(const struct logical_volume *lv)
 	log_print("--- Segments ---");
 
 	dm_list_iterate_items(seg, &lv->segments) {
-		log_print("Logical extent %u to %u:",
+		log_print("%s extents %u to %u:",
+			  lv_is_virtual(lv) ? "Virtual" : "Logical",
 			  seg->le, seg->le + seg->len - 1);
 
 		log_print("  Type\t\t%s", seg->segtype->ops->name(seg));
+
+		if (seg->segtype->ops->target_monitored)
+			log_print("  Monitoring\t\t%s",
+				  lvseg_monitor_dup(lv->vg->cmd->mem, seg));
 
 		if (seg->segtype->ops->display)
 			seg->segtype->ops->display(seg);
@@ -802,14 +737,14 @@ void vgdisplay_full(const struct volume_group *vg)
 			       (uint64_t) vg->extent_count * vg->extent_size));
 
 	log_print("PE Size               %s",
-		  display_size(vg->cmd, (uint64_t) vg->extent_size));
+		  display_size(vg->cmd, vg->extent_size));
 
 	log_print("Total PE              %u", vg->extent_count);
 
 	log_print("Alloc PE / Size       %u / %s",
 		  vg->extent_count - vg->free_count,
 		  display_size(vg->cmd,
-			       ((uint64_t) vg->extent_count - vg->free_count) *
+			       (uint64_t) (vg->extent_count - vg->free_count) *
 			       vg->extent_size));
 
 	log_print("Free  PE / Size       %u / %s", vg->free_count,
@@ -902,9 +837,53 @@ void display_segtypes(const struct cmd_context *cmd)
 	}
 }
 
+void display_tags(const struct cmd_context *cmd)
+{
+	const struct dm_str_list *sl;
+
+	dm_list_iterate_items(sl, &cmd->tags) {
+		log_print("%s", sl->str);
+	}
+}
+
+void display_name_error(name_error_t name_error)
+{
+	switch(name_error) {
+	case NAME_VALID:
+		/* Valid name */
+		break;
+	case NAME_INVALID_EMPTY:
+		log_error("Name is zero length.");
+		break;
+	case NAME_INVALID_HYPEN:
+		log_error("Name cannot start with hyphen.");
+		break;
+	case NAME_INVALID_DOTS:
+		log_error("Name starts with . or .. and has no "
+			  "following character(s).");
+		break;
+	case NAME_INVALID_CHARSET:
+		log_error("Name contains invalid character, valid set includes: "
+			  "[a-zA-Z0-9.-_+].");
+		break;
+	case NAME_INVALID_LENGTH:
+		/* Report that name length - 1 to accommodate nul*/
+		log_error("Name length exceeds maximum limit of %d.", (NAME_LEN - 1));
+		break;
+	default:
+		log_error(INTERNAL_ERROR "Unknown error %d on name validation.", name_error);
+		break;
+	}
+}
+
+/*
+ * Prompt for y or n from stdin.
+ * Defaults to 'no' in silent mode.
+ * All callers should support --yes and/or --force to override this.
+ */
 char yes_no_prompt(const char *prompt, ...)
 {
-	int c = 0, ret = 0;
+	int c = 0, ret = 0, cb = 0;
 	va_list ap;
 
 	sigint_allow();
@@ -914,11 +893,17 @@ char yes_no_prompt(const char *prompt, ...)
 			vfprintf(stderr, prompt, ap);
 			va_end(ap);
 			fflush(stderr);
+			if (silent_mode()) {
+				fputc('n', stderr);
+				ret = 'n';
+				break;
+			}
 			ret = 0;
 		}
 
 		if ((c = getchar()) == EOF) {
-			ret = 'n';
+			ret = 'n'; /* SIGINT */
+			cb = 1;
 			break;
 		}
 
@@ -934,9 +919,11 @@ char yes_no_prompt(const char *prompt, ...)
 
 	sigint_restore();
 
+	if (cb && !sigint_caught())
+		fputc(ret, stderr);
+
 	if (c != '\n')
-		printf("\n");
+		fputc('\n', stderr);
 
 	return ret;
 }
-

@@ -25,7 +25,6 @@
 #if CMIRROR_HAS_CHECKPOINT
 #include <openais/saAis.h>
 #include <openais/saCkpt.h>
-#endif
 
 /* Open AIS error codes */
 #define str_ais_error(x)						\
@@ -57,6 +56,40 @@
 	((x) == SA_AIS_ERR_TOO_BIG) ? "SA_AIS_ERR_TOO_BIG" :		\
 	((x) == SA_AIS_ERR_NO_SECTIONS) ? "SA_AIS_ERR_NO_SECTIONS" :	\
 	"ais_error_unknown"
+#else
+#define str_ais_error(x)						\
+	((x) == CS_OK) ? "CS_OK" :				\
+	((x) == CS_ERR_LIBRARY) ? "CS_ERR_LIBRARY" :		\
+	((x) == CS_ERR_VERSION) ? "CS_ERR_VERSION" :		\
+	((x) == CS_ERR_INIT) ? "CS_ERR_INIT" :			\
+	((x) == CS_ERR_TIMEOUT) ? "CS_ERR_TIMEOUT" :		\
+	((x) == CS_ERR_TRY_AGAIN) ? "CS_ERR_TRY_AGAIN" :	\
+	((x) == CS_ERR_INVALID_PARAM) ? "CS_ERR_INVALID_PARAM" : \
+	((x) == CS_ERR_NO_MEMORY) ? "CS_ERR_NO_MEMORY" :	\
+	((x) == CS_ERR_BAD_HANDLE) ? "CS_ERR_BAD_HANDLE" :	\
+	((x) == CS_ERR_BUSY) ? "CS_ERR_BUSY" :			\
+	((x) == CS_ERR_ACCESS) ? "CS_ERR_ACCESS" :		\
+	((x) == CS_ERR_NOT_EXIST) ? "CS_ERR_NOT_EXIST" :	\
+	((x) == CS_ERR_NAME_TOO_LONG) ? "CS_ERR_NAME_TOO_LONG" : \
+	((x) == CS_ERR_EXIST) ? "CS_ERR_EXIST" :		\
+	((x) == CS_ERR_NO_SPACE) ? "CS_ERR_NO_SPACE" :		\
+	((x) == CS_ERR_INTERRUPT) ? "CS_ERR_INTERRUPT" :	\
+	((x) == CS_ERR_NAME_NOT_FOUND) ? "CS_ERR_NAME_NOT_FOUND" : \
+	((x) == CS_ERR_NO_RESOURCES) ? "CS_ERR_NO_RESOURCES" :	\
+	((x) == CS_ERR_NOT_SUPPORTED) ? "CS_ERR_NOT_SUPPORTED" : \
+	((x) == CS_ERR_BAD_OPERATION) ? "CS_ERR_BAD_OPERATION" : \
+	((x) == CS_ERR_FAILED_OPERATION) ? "CS_ERR_FAILED_OPERATION" : \
+	((x) == CS_ERR_MESSAGE_ERROR) ? "CS_ERR_MESSAGE_ERROR" : \
+	((x) == CS_ERR_QUEUE_FULL) ? "CS_ERR_QUEUE_FULL" :	\
+	((x) == CS_ERR_QUEUE_NOT_AVAILABLE) ? "CS_ERR_QUEUE_NOT_AVAILABLE" : \
+	((x) == CS_ERR_BAD_FLAGS) ? "CS_ERR_BAD_FLAGS" :	\
+	((x) == CS_ERR_TOO_BIG) ? "CS_ERR_TOO_BIG" :		\
+	((x) == CS_ERR_NO_SECTIONS) ? "CS_ERR_NO_SECTIONS" :	\
+	((x) == CS_ERR_CONTEXT_NOT_FOUND) ? "CS_ERR_CONTEXT_NOT_FOUND" : \
+	((x) == CS_ERR_TOO_MANY_GROUPS) ? "CS_ERR_TOO_MANY_GROUPS" : \
+	((x) == CS_ERR_SECURITY) ? "CS_ERR_SECURITY" : \
+	"cs_error_unknown"
+#endif
 
 #define _RQ_TYPE(x)							\
 	((x) == DM_ULOG_CHECKPOINT_READY) ? "DM_ULOG_CHECKPOINT_READY": \
@@ -89,7 +122,7 @@ struct checkpoint_data {
 	char *clean_bits;
 	char *recovering_region;
 	struct checkpoint_data *next;
-};	
+};
 
 #define INVALID 0
 #define VALID   1
@@ -803,6 +836,11 @@ static int import_checkpoint(struct clog_cpg *entry, int no_read,
 {
 	int bitmap_size;
 
+	if (no_read) {
+		LOG_DBG("Checkpoint for this log already received");
+		return 0;
+	}
+
 	bitmap_size = (rq->u_rq.data_size - RECOVERING_REGION_SECTION_SIZE) / 2;
 	if (bitmap_size < 0) {
 		LOG_ERROR("Checkpoint has invalid payload size.");
@@ -910,10 +948,11 @@ static int resend_requests(struct clog_cpg *entry)
 				   rq->u_rq.seq);
 
 			rq->u_rq.data_size = 0;
-			kernel_send(&rq->u_rq);
-				
+			if (kernel_send(&rq->u_rq))
+				LOG_ERROR("Failed to respond to kernel [%s]",
+					  RQ_TYPE(rq->u_rq.request_type));
 			break;
-			
+
 		default:
 			/*
 			 * If an action or a response is required, then
@@ -945,8 +984,16 @@ static int do_cluster_work(void *data __attribute__((unused)))
 
 	dm_list_iterate_items_safe(entry, tmp, &clog_cpg_list) {
 		r = cpg_dispatch(entry->handle, CS_DISPATCH_ALL);
-		if (r != CS_OK)
-			LOG_ERROR("cpg_dispatch failed: %d", r);
+		if (r != CS_OK) {
+			if ((r == CS_ERR_BAD_HANDLE) &&
+			    ((entry->state == INVALID) ||
+			     (entry->state == LEAVING)))
+				/* It's ok if we've left the cluster */
+				r = CS_OK;
+			else
+				LOG_ERROR("cpg_dispatch failed: %s",
+					  str_ais_error(r));
+		}
 
 		if (entry->free_me) {
 			free(entry);
@@ -1019,7 +1066,7 @@ static void cpg_message_callback(cpg_handle_t handle, const struct cpg_name *gna
 	int i_am_server;
 	int response = 0;
 	struct clog_request *rq = msg;
-	struct clog_request *tmp_rq;
+	struct clog_request *tmp_rq, *tmp_rq2;
 	struct clog_cpg *match;
 
 	match = find_clog_cpg(handle);
@@ -1150,18 +1197,17 @@ static void cpg_message_callback(cpg_handle_t handle, const struct cpg_name *gna
 
 		if (match->state == INVALID) {
 			LOG_DBG("Log not valid yet, storing request");
-			tmp_rq = malloc(DM_ULOG_REQUEST_SIZE);
-			if (!tmp_rq) {
+			if (!(tmp_rq2 = malloc(DM_ULOG_REQUEST_SIZE))) {
 				LOG_ERROR("cpg_message_callback:  Unable to"
 					  " allocate transfer structs");
 				r = -ENOMEM; /* FIXME: Better error #? */
 				goto out;
 			}
 
-			memcpy(tmp_rq, rq, sizeof(*rq) + rq->u_rq.data_size);
-			tmp_rq->pit_server = match->lowest_id;
-			dm_list_init(&tmp_rq->u.list);
-			dm_list_add(&match->startup_list, &tmp_rq->u.list);
+			memcpy(tmp_rq2, rq, sizeof(*rq) + rq->u_rq.data_size);
+			tmp_rq2->pit_server = match->lowest_id;
+			dm_list_init(&tmp_rq2->u.list);
+			dm_list_add(&match->startup_list, &tmp_rq2->u.list);
 			goto out;
 		}
 
@@ -1231,11 +1277,11 @@ out:
 				   _RQ_TYPE(rq->u_rq.request_type),
 				   rq->originator, (response) ? "YES" : "NO");
 		else
-			LOG_SPRINT(match, "SEQ#=%u, UUID=%s, TYPE=%s, ORIG=%u, RESP=%s, RSPR=%u",
+			LOG_SPRINT(match, "SEQ#=%u, UUID=%s, TYPE=%s, ORIG=%u, RESP=%s, RSPR=%u, error=%d",
 				   rq->u_rq.seq, SHORT_UUID(rq->u_rq.uuid),
 				   _RQ_TYPE(rq->u_rq.request_type),
 				   rq->originator, (response) ? "YES" : "NO",
-				   nodeid);
+				   nodeid, rq->u_rq.error);
 	}
 }
 
@@ -1248,7 +1294,7 @@ static void cpg_join_callback(struct clog_cpg *match,
 	uint32_t my_pid = (uint32_t)getpid();
 	uint32_t lowest = match->lowest_id;
 	struct clog_request *rq;
-	char dbuf[32];
+	char dbuf[32] = { 0 };
 
 	/* Assign my_cluster_id */
 	if ((my_cluster_id == 0xDEAD) && (joined->pid == my_pid))
@@ -1264,7 +1310,6 @@ static void cpg_join_callback(struct clog_cpg *match,
 	if (joined->nodeid == my_cluster_id)
 		goto out;
 
-	memset(dbuf, 0, sizeof(dbuf));
 	for (i = 0; i < member_list_entries - 1; i++)
 		sprintf(dbuf+strlen(dbuf), "%u-", member_list[i].nodeid);
 	sprintf(dbuf+strlen(dbuf), "(%u)", joined->nodeid);
@@ -1346,7 +1391,9 @@ static void cpg_leave_callback(struct clog_cpg *match,
 			dm_list_del(&rq->u.list);
 
 			if (rq->u_rq.request_type == DM_ULOG_POSTSUSPEND)
-				kernel_send(&rq->u_rq);
+				if (kernel_send(&rq->u_rq))
+					LOG_ERROR("Failed to respond to kernel [%s]",
+						  RQ_TYPE(rq->u_rq.request_type));
 			free(rq);
 		}
 
@@ -1355,7 +1402,7 @@ static void cpg_leave_callback(struct clog_cpg *match,
 		match->free_me = 1;
 		match->lowest_id = 0xDEAD;
 		match->state = INVALID;
-	}			
+	}
 
 	/* Remove any pending checkpoints for the leaving node. */
 	for (p_cp = NULL, c_cp = match->checkpoint_list;
@@ -1411,7 +1458,7 @@ static void cpg_leave_callback(struct clog_cpg *match,
 			 left->nodeid);
 		return;
 	}
-		
+
 	match->lowest_id = member_list[0].nodeid;
 	for (i = 0; i < member_list_entries; i++)
 		if (match->lowest_id > member_list[i].nodeid)
@@ -1530,7 +1577,7 @@ unlink_retry:
                 usleep(1000);
                 goto unlink_retry;
         }
-	
+
 	if (rv != SA_AIS_OK) {
                 LOG_ERROR("[%s] Failed to unlink checkpoint: %s",
                           SHORT_UUID(entry->name.value), str_ais_error(rv));
@@ -1633,7 +1680,7 @@ static int _destroy_cluster_cpg(struct clog_cpg *del)
 {
 	int r;
 	int state;
-	
+
 	LOG_COND(log_resend_requests, "[%s] I am leaving.2.....",
 		 SHORT_UUID(del->name.value));
 

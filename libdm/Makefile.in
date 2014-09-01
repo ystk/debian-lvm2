@@ -34,6 +34,10 @@ SOURCES =\
 	$(interface)/libdm-iface.c
 
 INCLUDES = -I$(srcdir)/$(interface) -I$(srcdir)
+ifeq ("@VALGRIND_POOL@", "yes")
+INCLUDES += @VALGRIND_CFLAGS@
+endif
+CFLAGS += $(UDEV_CFLAGS)
 
 ifeq ("@STATIC_LINK@", "yes")
 LIB_STATIC = $(interface)/libdevmapper.a
@@ -54,7 +58,7 @@ include $(top_builddir)/make.tmpl
 DEFS += -DDM_DEVICE_UID=@DM_DEVICE_UID@ -DDM_DEVICE_GID=@DM_DEVICE_GID@ \
 	-DDM_DEVICE_MODE=@DM_DEVICE_MODE@
 
-LIBS += $(SELINUX_LIBS) $(UDEV_LIBS)
+LIBS += $(SELINUX_LIBS) $(UDEV_LIBS) $(PTHREAD_LIBS)
 
 device-mapper: all
 

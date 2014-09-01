@@ -48,7 +48,7 @@ static int vgimport_single(struct cmd_context *cmd __attribute__((unused)),
 
 	backup(vg);
 
-	log_print("Volume group \"%s\" successfully imported", vg->name);
+	log_print_unless_silent("Volume group \"%s\" successfully imported", vg->name);
 
 	return ECMD_PROCESSED;
 
@@ -60,12 +60,28 @@ int vgimport(struct cmd_context *cmd, int argc, char **argv)
 {
 	if (!argc && !arg_count(cmd, all_ARG)) {
 		log_error("Please supply volume groups or use -a for all.");
-		return ECMD_FAILED;
+		return EINVALID_CMD_LINE;
 	}
 
 	if (argc && arg_count(cmd, all_ARG)) {
 		log_error("No arguments permitted when using -a for all.");
-		return ECMD_FAILED;
+		return EINVALID_CMD_LINE;
+	}
+
+	if (arg_count(cmd, force_ARG)) {
+		/*
+		 * The volume group cannot be repaired unless it is first
+		 * imported.  If we don't allow the user a way to import the
+		 * VG while it is 'partial', then we will have created a
+		 * circular dependency.
+		 *
+		 * The reason we don't just simply set 'handles_missing_pvs'
+		 * by default is that we want to guard against the case
+		 * where the user simply forgot to move one or more disks in
+		 * the VG before running 'vgimport'.
+		 */
+		log_warn("WARNING: Volume groups with missing PVs will be imported with --force.");
+		cmd->handles_missing_pvs = 1;
 	}
 
 	return process_each_vg(cmd, argc, argv,

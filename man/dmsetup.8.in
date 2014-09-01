@@ -1,6 +1,6 @@
 .TH DMSETUP 8 "Apr 06 2006" "Linux" "MAINTENANCE COMMANDS"
 .SH NAME
-dmsetup \- low level logical volume management
+dmsetup \(em low level logical volume management
 .SH SYNOPSIS
 .ad l
 .B dmsetup clear
@@ -40,6 +40,8 @@ dmsetup \- low level logical volume management
 .IR fields ]
 .RB [ \-O | \-\-sort
 .IR sort_fields ]
+.RB [ \-S | \-\-select
+.IR Selection ]
 .RI [ device_name ]
 .RE
 .br
@@ -54,6 +56,7 @@ dmsetup \- low level logical volume management
 .RB [ \-\-exec
 .IR command ]
 .RB [ \-\-tree ]
+.RS
 .RB [ \-o
 .IR options ]
 .RE
@@ -109,6 +112,7 @@ dmsetup \- low level logical volume management
 .B dmsetup status
 .RB [ \-\-target
 .IR target_type ]
+.RB [ \-\-noflush ]
 .RI [ device_name ]
 .br
 .B dmsetup suspend
@@ -143,6 +147,7 @@ dmsetup \- low level logical volume management
 .B dmsetup version
 .br
 .B dmsetup wait
+.RB [ \-\-noflush ]
 .I device_name
 .RI [ event_nr ]
 .br
@@ -189,16 +194,22 @@ When returning any table information from the kernel report on the
 inactive table instead of the live table.
 Requires kernel driver version 4.16.0 or above.
 .TP
-.IR \fB\-\-manglename \ < mangling_mode >
+.IR \fB\-\-manglename \ { none | hex | auto }
 Mangle any character not on a whitelist using mangling_mode when
-processing device-mapper device names. The names are mangled on
-input and unmangled on output where the mangling_mode is one of:
-none (no mangling), hex (always do the mangling) and auto
-(only do the mangling if not mangled yet, do nothing if already
-mangled, error on mixed; this is used by default).
+processing device-mapper device names and UUIDs. The names and UUIDs
+are mangled on input and unmangled on output where the mangling mode
+is one of:
+\fInone\fP (no mangling),
+\fIhex\fP (always do the mangling) and
+\fIauto\fP (only do the mangling if not mangled yet, do nothing
+if already mangled, error on mixed)
+Default mode is \fI#DEFAULT_MANGLING#\fP.
 Character whitelist: 0-9, A-Z, a-z, #+-.:=@_. This whitelist is
 also supported by udev. Any character not on a whitelist is replaced
 with its hex value (two digits) prefixed by \\x.
+Mangling mode could be also set through
+.B DM_DEFAULT_NAME_MANGLING_MODE
+environment variable.
 .TP
 .BR \-j | \-\-major\ \fImajor
 Specify the major number.
@@ -235,11 +246,24 @@ The value \fInone\fP is equivalent to specifying zero.
 .BR \-r | \-\-readonly
 Set the table being loaded read-only.
 .TP
+.BR \-S | \-\-select \ \fISelection
+Display only rows that match Selection criteria. All rows are displayed
+with the additional "selected" column (-o selected) showing 1 if the row
+matches the Selection and 0 otherwise. The Selection criteria are defined
+by specifying column names and their valid values while making use of
+supported comparison operators. As a quick help and to see full list of
+column names that can be used in Selection and the set of supported
+selection operators, check the output of \fBdmsetup info -c -S help\fP
+command.
+.TP
 .IR \fB\-\-table \ < table >
 Specify a one-line table directly on the command line.
 .TP
 .B \-\-udevcookie \fIcookie
 Use cookie for udev synchronisation.
+Note: Same cookie should be used for same type of operations i.e. creation of
+multiple different devices. It's not adviced to combine different
+operations on the single device.
 .TP
 .BR \-u | \-\-uuid
 Specify the uuid.
@@ -277,7 +301,7 @@ Destroys the table in the inactive table slot for device_name.
 .br
 Creates a device with the given name.
 If table_file or <table> is supplied, the table is loaded and made live.
-Otherwise a table is read from standard input unless \-\-notable is used.
+Otherwise a table is read from standard input unless \fB\-\-notable\fP is used.
 The optional uuid can be used in place of
 device_name in subsequent dmsetup commands.
 If successful a device will appear as
@@ -355,7 +379,7 @@ each device.  The device name is appended to the supplied command.
 Device names on output can be customised by following options: devno (major
 and minor pair, used by default), blkdevname (block device name),
 devname (map name for device-mapper devices, equal to blkdevname otherwise).
---tree displays dependencies between devices as a tree.
+\fB\-\-tree\fP displays dependencies between devices as a tree.
 It accepts a comma-separate list of options.
 Some specify the information displayed against each node:
 device/nodevice; blkdevname; active, open, rw, uuid.
@@ -377,7 +401,7 @@ If neither is supplied, reads a table from standard input.
 .br
 Wait for any I/O in-flight through the device to complete, then
 replace the table with a new table that fails any new I/O
-sent to the device.  If successful, this should release any devices 
+sent to the device.  If successful, this should release any devices
 held open by the device's table(s).
 .br
 .HP
@@ -399,10 +423,14 @@ driver, adding, changing or removing nodes as necessary.
 .B mangle
 .RI [ device_name ]
 .br
-Ensure existing device-mapper device name is in the correct mangled
+Ensure existing device-mapper device name and UUID is in the correct mangled
 form containing only whitelisted characters (supported by udev) and do
 a rename if necessary. Any character not on the whitelist will be mangled
-based on the --manglename settting.
+based on the \fB\-\-manglename\fP setting. Automatic rename works only for device
+names and not for device UUIDs because the kernel does not allow changing
+the UUID of active devices. Any incorrect UUIDs are reported only and they
+must be manually corrected by deactivating the device first and then
+reactivating it with proper mangling mode used (see also \fB\-\-manglename\fP).
 .br
 .HP
 .B remove
@@ -416,12 +444,15 @@ that contain a version of device-mapper prior to 4.8.0.
 In this case the device will be deleted when its open_count
 drops to zero.  From version 4.8.0 onwards, if a device can't
 be removed because an uninterruptible process is waiting for
-I/O to return from it, adding \-\-force will replace the table
+I/O to return from it, adding \fB\-\-force\fP will replace the table
 with one that fails all I/O, which might allow the
 process to be killed. If an attempt to remove a device fails,
 perhaps because a process run from a quick udev rule
-temporarily opened the device, the \-\-retry option will cause
+temporarily opened the device, the \fB\-\-retry\fP option will cause
 the operation to be retried for a few seconds before failing.
+Do NOT combine \fB\-\-force\fP and \fB\-\-udevcookie\fP,
+as udev may start to process udev rules in the middle of error target
+replacement and result in nondeterministic result.
 .br
 .HP
 .B remove_all
@@ -430,7 +461,7 @@ the operation to be retried for a few seconds before failing.
 Attempts to remove all device definitions i.e. reset the driver.
 Use with care!  From version 4.8.0 onwards, if devices can't
 be removed because uninterruptible processes are waiting for
-I/O to return from them, adding \-\-force will replace the table
+I/O to return from them, adding \fB\-\-force\fP will replace the table
 with one that fails all I/O, which might allow the
 process to be killed.  This also runs \fBmknodes\fP afterwards.
 .br
@@ -471,17 +502,25 @@ Sets the device geometry to C/H/S.
 .RI [ subsystem ]
 .br
 Splits given device name into subsystem constituents.
-Default subsystem is LVM.
+The default subsystem is LVM.  
+LVM currently generates device names by concatenating the names of the Volume
+Group, Logical Volume and any internal Layer with a hyphen as separator.
+Any hyphens within the names are doubled to escape them.
+The precise encoding might change without notice in any future
+release, so we recommend you always decode using the current version of
+this command.
 .br
 .TP
 .B status
 .RB [ \-\-target
 .IR target_type ]
+.RB [ \-\-noflush ]
 .RI [ device_name ]
 .br
 Outputs status information for each of the device's targets.
-With \-\-target, only information relating to the specified target type
-is displayed.
+With \fB\-\-target\fP, only information relating to the specified target type
+any is displayed.  With \fB\-\-noflush\fP, the thin target (from version 1.3.0)
+doesn't commit any outstanding changes to disk before reporting its statistics.
 .br
 .HP
 .B suspend
@@ -493,9 +532,9 @@ Suspends a device.  Any I/O that has already been mapped by the device
 but has not yet completed will be flushed.  Any further I/O to that
 device will be postponed for as long as the device is suspended.
 If there's a filesystem on the device which supports the operation,
-an attempt will be made to sync it first unless \-\-nolockfs is specified.
+an attempt will be made to sync it first unless \fB\-\-nolockfs\fP is specified.
 Some targets such as recent (October 2006) versions of multipath may support
-the \-\-noflush option.  This lets outstanding I/O that has not yet reached the
+the \fB\-\-noflush\fP option.  This lets outstanding I/O that has not yet reached the
 device to remain unflushed.
 .br
 .TP
@@ -507,10 +546,10 @@ device to remain unflushed.
 .br
 Outputs the current table for the device in a format that can be fed
 back in using the create or load commands.
-With \-\-target, only information relating to the specified target type
+With \fB\-\-target\fP, only information relating to the specified target type
 is displayed.
 Encryption keys are suppressed in the table output for the crypt
-target unless the \-\-showkeys parameter is supplied.
+target unless the \fB\-\-showkeys\fP parameter is supplied.
 .br
 .TP
 .B targets
@@ -544,8 +583,8 @@ The output is a cookie value. Normally we don't need to create cookies since
 dmsetup creates and destroys them for each action automatically. However, we can
 generate one explicitly to group several actions together and use only one
 cookie instead. We can define a cookie to use for each relevant command by using
-\-\-udevcookie option. Alternatively, we can export this value into the environment
-of the dmsetup process as DM_UDEV_COOKIE variable and it will be used automatically
+\fB\-\-udevcookie\fP option. Alternatively, we can export this value into the environment
+of the dmsetup process as \fBDM_UDEV_COOKIE\fP variable and it will be used automatically
 with all subsequent commands until it is unset.
 Invoking this command will create system-wide semaphore that needs to be cleaned
 up explicitly by calling udevreleasecookie command.
@@ -568,7 +607,7 @@ always reported as DM_SUBSYSTEM_UDEV_FLAG<flag_position>='1'. There are
 .br
 Waits for all pending udev processing bound to given cookie value and clean up
 the cookie with underlying semaphore. If the cookie is not given directly,
-the command will try to use a value defined by DM_UDEV_COOKIE environment variable.
+the command will try to use a value defined by \fBDM_UDEV_COOKIE\fP environment variable.
 .br
 .TP
 .B version
@@ -577,13 +616,16 @@ Outputs version information.
 
 .TP
 .B wait
+.RB [ \-\-noflush ]
 .I device_name
 .RI [ event_nr ]
 .br
 Sleeps until the event counter for device_name exceeds event_nr.
-Use \-v to see the event number returned.
+Use \fB\-v\fP to see the event number returned.
 To wait until the next event is triggered, use \fBinfo\fP to find
 the last event number.
+With \fB\-\-noflush\fP, the thin target (from version 1.3.0) doesn't commit
+any outstanding changes to disk before reporting its statistics.
 .SH TABLE FORMAT
 Each line of the table specifies a single target and is of the form:
 .P
@@ -591,7 +633,7 @@ Each line of the table specifies a single target and is of the form:
 .B target_type
 .RI < target_args >
 .P
-Simple target types and <target_args> include: 
+Simple target types and <target_args> include:
 .HP
 .B linear
 .I destination_device start_sector
@@ -626,7 +668,7 @@ for creating devices with holes in them.
 .br
 Returns blocks of zeroes on reads.  Any data written is discarded silently.
 This is a block-device equivalent of the /dev/zero character-device data sink
-described in \fBnull(4)\fP.
+described in \fBnull\fP(4).
 .P
 More complex targets include:
 .TP
@@ -662,8 +704,8 @@ Supports snapshots of devices.
 .P
 To find out more about the various targets and their table formats and status
 lines, please read the files in the Documentation/device-mapper directory in
-the kernel source tree.  
-(Your distribution might include a copy of this information in the 
+the kernel source tree.
+(Your distribution might include a copy of this information in the
 documentation directory for the device-mapper package.)
 
 .SH EXAMPLES
@@ -694,10 +736,16 @@ Defaults to "/dev" and must be an absolute path.
 .TP
 .B DM_UDEV_COOKIE
 A cookie to use for all relevant commands to synchronize with udev processing.
-It is an alternative to using \-\-udevcookie option.
+It is an alternative to using \fB\-\-udevcookie\fP option.
+.TP
+.B DM_DEFAULT_NAME_MANGLING_MODE
+A default mangling mode. Defaults to "\fI#DEFAULT_MANGLING#\fP"
+and it is an alternative to using \fB\-\-manglename\fP option.
 
 .SH AUTHORS
-Original version: Joe Thornber (thornber@sistina.com)
+Original version: Joe Thornber (thornber@redhat.com)
 
 .SH SEE ALSO
+LVM2 resource page https://www.sourceware.org/lvm2/
+.br
 Device-mapper resource page: http://sources.redhat.com/dm/

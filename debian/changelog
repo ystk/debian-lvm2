@@ -1,10 +1,98 @@
-lvm2 (2.02.95-8) stable; urgency=low
+lvm2 (2.02.109-1) unstable; urgency=medium
+
+  * New upstream version.
+
+ -- Bastian Blank <waldi@debian.org>  Tue, 19 Aug 2014 15:37:06 +0200
+
+lvm2 (2.02.106-2) unstable; urgency=medium
+
+  * Enable cache support. (closes: #749599)
+  * Update Standards-Version to 3.9.5:
+    - Strip XC-prefix.
+
+ -- Bastian Blank <waldi@debian.org>  Mon, 09 Jun 2014 21:49:02 +0200
+
+lvm2 (2.02.106-1) unstable; urgency=medium
+
+  * New upstream version.
+  * Break older thin-provisioning-tools.
+
+ -- Bastian Blank <waldi@debian.org>  Sun, 18 May 2014 15:22:30 +0200
+
+lvm2 (2.02.104-2) unstable; urgency=medium
+
+  * Don't longer disable O_DIRECT.
+  * Install lvmetad systemd units:
+    - Don't activate it always.
+    - Set sbin dir.
+
+ -- Bastian Blank <waldi@debian.org>  Fri, 14 Feb 2014 19:38:41 +0100
+
+lvm2 (2.02.104-1) unstable; urgency=medium
+
+  * New upstream version.
+  * Hard-code locations of thin utils.
+  * Move development stuff into multi-arch paths.
+  * Enable lvmetad. (closes: #704759)
+  * Re-use patched upstream udev rules.
+    - Remove own copy.
+    - Rename during installation.
+    - Make compatible.
+  * Re-organize initramfs-tools installation.
+  * Install systemd units:
+    - Add non-generator activation-services.
+    - Alias to mask lvm2 init script.
+    - Build-depend on dh-systemd.
+  * Add tmpfiles info.
+
+ -- Bastian Blank <waldi@debian.org>  Wed, 29 Jan 2014 22:09:35 +0100
+
+lvm2 (2.02.98-6) unstable; urgency=low
+
+  * Update init script:
+    - Use auto-activation.
+    - Drop manual loading of dm-mod.
+  * Fix udev rules:
+    - Re-add another oversight.
+
+ -- Bastian Blank <waldi@debian.org>  Tue, 27 Aug 2013 13:13:17 +0200
+
+lvm2 (2.02.98-5) unstable; urgency=low
 
   * Fix udev rules.
     - Properly exclude special devices, this part got lost. (closes: #718582)
     - Always call udev sync.
 
- -- Bastian Blank <waldi@debian.org>  Mon, 30 Sep 2013 22:25:35 +0200
+ -- Bastian Blank <waldi@debian.org>  Wed, 07 Aug 2013 15:10:23 +0200
+
+lvm2 (2.02.98-4) unstable; urgency=low
+
+  * Drop still broken udev stuff. (closes: #712049)
+  * Make thin support usable:
+    - Suggest thin-privisioning-tools.
+    - Set correct location for thin_check binary.
+
+ -- Bastian Blank <waldi@debian.org>  Sun, 14 Jul 2013 16:37:56 +0200
+
+lvm2 (2.02.98-3) unstable; urgency=low
+
+  * Revert udev rules. (closes: #711740)
+
+ -- Bastian Blank <waldi@debian.org>  Sun, 09 Jun 2013 22:08:02 +0200
+
+lvm2 (2.02.98-2) unstable; urgency=low
+
+  * Use udev monitor for synchronization.
+  * Fix wrong disable in udev rules.
+
+ -- Bastian Blank <waldi@debian.org>  Sat, 08 Jun 2013 12:50:57 +0200
+
+lvm2 (2.02.98-1) unstable; urgency=low
+
+  * New upstream version.
+  * Re-enable thin support.
+
+ -- Bastian Blank <waldi@debian.org>  Sun, 03 Mar 2013 12:33:47 +0100
 
 lvm2 (2.02.95-7) testing; urgency=low
 

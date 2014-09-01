@@ -20,20 +20,18 @@ static int vgconvert_single(struct cmd_context *cmd, const char *vg_name,
 			    void *handle __attribute__((unused)))
 {
 	struct physical_volume *pv, *existing_pv;
+	struct pvcreate_restorable_params rp;
 	struct logical_volume *lv;
 	struct lv_list *lvl;
 	int pvmetadatacopies = 0;
 	uint64_t pvmetadatasize = 0;
-	uint64_t pe_start = 0;
 	struct pv_list *pvl;
 	int change_made = 0;
 	struct lvinfo info;
 	int active = 0;
 
-	if (!vg_check_status(vg, LVM_WRITE | EXPORTED_VG)) {
-		stack;
-		return ECMD_FAILED;
-	}
+	if (!vg_check_status(vg, LVM_WRITE | EXPORTED_VG))
+		return_ECMD_FAILED;
 
 	if (vg->fid->fmt == cmd->fmt) {
 		log_error("Volume group \"%s\" already uses format %s",
@@ -51,16 +49,21 @@ static int vgconvert_single(struct cmd_context *cmd, const char *vg_name,
 						  UINT64_C(0));
 		if (!pvmetadatasize)
 			pvmetadatasize =
-			    find_config_tree_int(cmd,
-					    "metadata/pvmetadatasize",
-					    DEFAULT_PVMETADATASIZE);
+			    find_config_tree_int(cmd, metadata_pvmetadatasize_CFG, NULL);
 
 		pvmetadatacopies = arg_int_value(cmd, pvmetadatacopies_ARG, -1);
 		if (pvmetadatacopies < 0)
 			pvmetadatacopies =
-			    find_config_tree_int(cmd,
-					    "metadata/pvmetadatacopies",
-					     DEFAULT_PVMETADATACOPIES);
+			    find_config_tree_int(cmd, metadata_pvmetadatacopies_CFG, NULL);
+	}
+
+	if (cmd->fmt->features & FMT_BAS) {
+		if (arg_sign_value(cmd, bootloaderareasize_ARG, SIGN_NONE) == SIGN_MINUS) {
+			log_error("Bootloader area size may not be negative");
+			return EINVALID_CMD_LINE;
+		}
+
+		rp.ba_size = arg_uint64_value(cmd, bootloaderareasize_ARG, UINT64_C(0));
 	}
 
 	if (!archive(vg)) {
@@ -108,24 +111,25 @@ static int vgconvert_single(struct cmd_context *cmd, const char *vg_name,
 		}
 	}
 
-	if (active) {
-		stack;
-		return ECMD_FAILED;
-	}
+	if (active)
+		return_ECMD_FAILED;
 
 	dm_list_iterate_items(pvl, &vg->pvs) {
 		existing_pv = pvl->pv;
 
-		pe_start = pv_pe_start(existing_pv);
+		rp.id = existing_pv->id;
+		rp.idp = &rp.id;
+		rp.pe_start = pv_pe_start(existing_pv);
+		rp.extent_count = pv_pe_count(existing_pv);
+		rp.extent_size = pv_pe_size(existing_pv);
+
 		/* pe_end = pv_pe_count(existing_pv) * pv_pe_size(existing_pv) + pe_start - 1; */
 
 		if (!(pv = pv_create(cmd, pv_dev(existing_pv),
-				     &existing_pv->id, 0, 0, 0,
-				     pe_start, pv_pe_count(existing_pv),
-				     pv_pe_size(existing_pv),
+				     0, 0, 0,
 				     arg_int64_value(cmd, labelsector_ARG,
 						     DEFAULT_LABELSECTOR),
-				     pvmetadatacopies, pvmetadatasize, 0))) {
+				     pvmetadatacopies, pvmetadatasize, 0, &rp))) {
 			log_error("Failed to setup physical volume \"%s\"",
 				  pv_dev_name(existing_pv));
 			if (change_made)
@@ -180,13 +184,13 @@ static int vgconvert_single(struct cmd_context *cmd, const char *vg_name,
 
 	log_verbose("Writing metadata for VG %s using format %s", vg_name,
 		    cmd->fmt->name);
-	if (!backup_restore_vg(cmd, vg)) {
+	if (!backup_restore_vg(cmd, vg, 0)) {
 		log_error("Conversion failed for volume group %s.", vg_name);
 		log_error("Use pvcreate and vgcfgrestore to repair from "
 			  "archived metadata.");
 		return ECMD_FAILED;
 	}
-	log_print("Volume group %s successfully converted", vg_name);
+	log_print_unless_silent("Volume group %s successfully converted", vg_name);
 
 	backup(vg);
 
@@ -221,6 +225,12 @@ int vgconvert(struct cmd_context *cmd, int argc, char **argv)
 	if (arg_count(cmd, pvmetadatacopies_ARG) &&
 	    arg_int_value(cmd, pvmetadatacopies_ARG, -1) > 2) {
 		log_error("Metadatacopies may only be 0, 1 or 2");
+		return EINVALID_CMD_LINE;
+	}
+
+	if (!(cmd->fmt->features & FMT_BAS) &&
+		arg_count(cmd, bootloaderareasize_ARG)) {
+		log_error("Bootloader area parameters only apply to text format");
 		return EINVALID_CMD_LINE;
 	}
 

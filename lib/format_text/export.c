@@ -119,8 +119,8 @@ static int _extend_buffer(struct formatter *f)
 {
 	char *newbuf;
 
-	log_debug("Doubling metadata output buffer to %" PRIu32,
-		  f->data.buf.size * 2);
+	log_debug_metadata("Doubling metadata output buffer to %" PRIu32,
+			   f->data.buf.size * 2);
 	if (!(newbuf = dm_realloc(f->data.buf.start,
 				   f->data.buf.size * 2))) {
 		log_error("Buffer reallocation failed.");
@@ -367,12 +367,12 @@ static int _print_flag_config(struct formatter *f, uint64_t status, int type)
 }
 
 
-static int _out_tags(struct formatter *f, struct dm_list *tags)
+static int _out_tags(struct formatter *f, struct dm_list *tagsl)
 {
 	char *tag_buffer;
 
-	if (!dm_list_empty(tags)) {
-		if (!(tag_buffer = alloc_printed_tags(tags)))
+	if (!dm_list_empty(tagsl)) {
+		if (!(tag_buffer = alloc_printed_tags(tagsl)))
 			return_0;
 		if (!out_text(f, "tags = %s", tag_buffer)) {
 			dm_free(tag_buffer);
@@ -396,7 +396,7 @@ static int _print_vg(struct formatter *f, struct volume_group *vg)
 	outf(f, "seqno = %u", vg->seqno);
 
 	if (vg->fid && vg->fid->fmt)
-		outf(f, "format = \"%s\" # informational", vg->fid->fmt->name);
+		outfc(f, "# informational", "format = \"%s\"", vg->fid->fmt->name);
 
 	if (!_print_flag_config(f, vg->status, VG_FLAGS))
 		return_0;
@@ -418,6 +418,10 @@ static int _print_vg(struct formatter *f, struct volume_group *vg)
 		outf(f, "allocation_policy = \"%s\"",
 		     get_alloc_string(vg->alloc));
 	}
+
+	if (vg->profile)
+		outf(f, "profile = \"%s\"", vg->profile->name);
+
 	outf(f, "metadata_copies = %u", vg->mda_copies);
 
 	return 1;
@@ -446,8 +450,7 @@ static int _print_pvs(struct formatter *f, struct volume_group *vg)
 {
 	struct pv_list *pvl;
 	struct physical_volume *pv;
-	char buffer[4096];
-	char *buf;
+	char buffer[PATH_MAX * 2];
 	const char *name;
 
 	outf(f, "physical_volumes {");
@@ -468,14 +471,13 @@ static int _print_pvs(struct formatter *f, struct volume_group *vg)
 
 		outf(f, "id = \"%s\"", buffer);
 
-		if (!(buf = alloca(dm_escaped_len(pv_dev_name(pv))))) {
-			log_error("temporary stack allocation for device name"
-				  "string failed");
+		if (strlen(pv_dev_name(pv)) >= PATH_MAX) {
+			log_error("pv device name size is out of bounds.");
 			return 0;
 		}
 
 		outhint(f, "device = \"%s\"",
-			dm_escape_double_quotes(buf, pv_dev_name(pv)));
+			dm_escape_double_quotes(buffer, pv_dev_name(pv)));
 		outnl(f);
 
 		if (!_print_flag_config(f, pv->status, PV_FLAGS))
@@ -489,6 +491,11 @@ static int _print_pvs(struct formatter *f, struct volume_group *vg)
 		outf(f, "pe_start = %" PRIu64, pv->pe_start);
 		outsize(f, vg->extent_size * (uint64_t) pv->pe_count,
 			"pe_count = %u", pv->pe_count);
+
+		if (pv->ba_start && pv->ba_size) {
+			outf(f, "ba_start = %" PRIu64, pv->ba_start);
+			outsize(f, pv->ba_size, "ba_size = %" PRIu64, pv->ba_size);
+		}
 
 		_dec_indent(f);
 		outf(f, "}");
@@ -617,6 +624,9 @@ static int _print_lv(struct formatter *f, struct logical_volume *lv)
 	if (lv->alloc != ALLOC_INHERIT)
 		outf(f, "allocation_policy = \"%s\"",
 		     get_alloc_string(lv->alloc));
+
+	if (lv->profile)
+		outf(f, "profile = \"%s\"", lv->profile->name);
 
 	switch (lv->read_ahead) {
 	case DM_READ_AHEAD_NONE:
@@ -834,6 +844,26 @@ size_t text_vg_export_raw(struct volume_group *vg, const char *desc, char **buf)
 size_t export_vg_to_buffer(struct volume_group *vg, char **buf)
 {
 	return text_vg_export_raw(vg, "", buf);
+}
+
+struct dm_config_tree *export_vg_to_config_tree(struct volume_group *vg)
+{
+	char *buf = NULL;
+	struct dm_config_tree *vg_cft;
+
+	if (!export_vg_to_buffer(vg, &buf)) {
+		log_error("Could not format metadata for VG %s.", vg->name);
+		return_NULL;
+	}
+
+	if (!(vg_cft = dm_config_from_string(buf))) {
+		log_error("Error parsing metadata for VG %s.", vg->name);
+		dm_free(buf);
+		return_NULL;
+	}
+
+	dm_free(buf);
+	return vg_cft;
 }
 
 #undef outf
