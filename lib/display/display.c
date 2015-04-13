@@ -86,7 +86,7 @@ alloc_policy_t get_alloc_from_string(const char *str)
 	return ALLOC_INVALID;
 }
 
-static const char *_percent_types[7] = { "NONE", "VGS", "FREE", "LVS", "PVS", "ORIGIN" };
+static const char *_percent_types[7] = { "NONE", "VG", "FREE", "LV", "PVS", "ORIGIN" };
 
 const char *get_percent_string(percent_type_t def)
 {
@@ -113,7 +113,7 @@ static const char *_display_size(const struct cmd_context *cmd,
 {
 	unsigned base = BASE_UNKNOWN;
 	unsigned s;
-	int suffix = 1, precision;
+	int suffix, precision;
 	uint64_t byte = UINT64_C(0);
 	uint64_t units = UINT64_C(1024);
 	char *size_buf = NULL;

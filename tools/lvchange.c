@@ -740,9 +740,8 @@ static int lvchange_writemostly(struct logical_volume *lv)
 	if (arg_count(cmd, writebehind_ARG))
 		raid_seg->writebehind = arg_uint_value(cmd, writebehind_ARG, 0);
 
-	if (arg_count(cmd, writemostly_ARG)) {
+	if ((pv_count = arg_count(cmd, writemostly_ARG))) {
 		/* writemostly can be specified more than once */
-		pv_count = arg_count(cmd, writemostly_ARG);
 		pv_names = dm_pool_alloc(lv->vg->vgmem, sizeof(char *) * pv_count);
 		if (!pv_names)
 			return_0;
@@ -795,7 +794,7 @@ static int lvchange_writemostly(struct logical_volume *lv)
 				 * We don't bother checking the metadata area,
 				 * since writemostly only affects the data areas.
 				 */
-				if ((seg_type(raid_seg, s) == AREA_UNASSIGNED))
+				if (seg_type(raid_seg, s) == AREA_UNASSIGNED)
 					continue;
 
 				if (lv_is_on_pv(seg_lv(raid_seg, s), pvl->pv)) {
@@ -964,26 +963,6 @@ static int _lvchange_single(struct cmd_context *cmd, struct logical_volume *lv,
 		return ECMD_FAILED;
 	}
 
-	if (lv_is_cow(lv) && !lv_is_virtual_origin(origin = origin_from_cow(lv)) &&
-	    arg_count(cmd, activate_ARG)) {
-		if (origin->origin_count < 2)
-			snaps_msg[0] = '\0';
-		else if (dm_snprintf(snaps_msg, sizeof(snaps_msg),
-				     " and %u other snapshot(s)",
-				     origin->origin_count - 1) < 0) {
-			log_error("Failed to prepare message.");
-			return ECMD_FAILED;
-		}
-
-		if (!arg_count(cmd, yes_ARG) &&
-		    (yes_no_prompt("Change of snapshot %s will also change its"
-				   " origin %s%s. Proceed? [y/n]: ", lv->name,
-				   origin->name, snaps_msg) == 'n')) {
-			log_error("Logical volume %s not changed.", lv->name);
-			return ECMD_FAILED;
-		}
-	}
-
 	if (lv->status & PVMOVE) {
 		log_error("Unable to change pvmove LV %s", lv->name);
 		if (arg_count(cmd, activate_ARG))
@@ -1013,10 +992,31 @@ static int _lvchange_single(struct cmd_context *cmd, struct logical_volume *lv,
 	    !arg_count(cmd, setactivationskip_ARG))
 	    /* Rest can be changed for stacked thin pool meta/data volumes */
 	    ;
-	else if (!(lv_is_visible(lv)) && !lv_is_virtual_origin(lv)) {
+	else if (!lv_is_visible(lv) && !lv_is_virtual_origin(lv)) {
 		log_error("Unable to change internal LV %s directly",
 			  lv->name);
 		return ECMD_FAILED;
+	}
+
+	if (lv_is_cow(lv) && arg_count(cmd, activate_ARG)) {
+		origin = origin_from_cow(lv);
+		if (origin->origin_count < 2)
+			snaps_msg[0] = '\0';
+		else if (dm_snprintf(snaps_msg, sizeof(snaps_msg),
+				     " and %u other snapshot(s)",
+				     origin->origin_count - 1) < 0) {
+			log_error("Failed to prepare message.");
+			return ECMD_FAILED;
+		}
+
+		if (!arg_count(cmd, yes_ARG) &&
+		    (yes_no_prompt("Change of snapshot %s will also change its "
+				   "origin %s%s. Proceed? [y/n]: ",
+				   display_lvname(lv), display_lvname(origin),
+				   snaps_msg) == 'n')) {
+			log_error("Logical volume %s not changed.", display_lvname(lv));
+			return ECMD_FAILED;
+		}
 	}
 
 	/*

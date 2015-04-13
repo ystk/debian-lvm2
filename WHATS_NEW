@@ -1,3 +1,25 @@
+Version 2.02.111 - 1st September 2014
+=====================================
+  Pass properly sized char buffers for sscanf when initializing clvmd.
+  Reinstate nosync logic when extending mirror. (2.02.110)
+  Fix total area extent calculation when allocating cache pool. (2.02.110)
+
+Version 2.02.110 - 26th August 2014
+===================================
+  Fix manipulation with thin-pools which are excluded via volume_list.
+  Support lv/vgremove -ff to remove thin vols from broken/inactive thin pools.
+  Fix typo breaking configure --with-lvm1=shared.
+  Modify lvresize code to handle raid/mirrors and physical extents.
+  Don't allow pvcreate to proceed if scanning or filtering fails.
+  Cleanly error when creating RAID with stripe size < PAGE_SIZE.
+  Print name of LV which on activation triggers delayed snapshot merge.
+  Add lv_layout and lv_role LV reporting fields.
+  Properly display lvs lv_attr volume type and target type bit for cache origin.
+  Fix pvcreate_check() to update cache correctly after signature wiping.
+  Fix primary device lookup failure for partition when processing mpath filter.
+  If LV inactive and non-clustered, do not issue "Cannot deactivate" on -aln.
+  Remove spurious "Skipping mirror LV" message on pvmove of clustered mirror.
+
 Version 2.02.109 - 5th August 2014
 ==================================
   Remove lv_volume_type field from reports. (2.02.108)
