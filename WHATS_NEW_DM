@@ -1,3 +1,18 @@
+Version 1.02.90 - 1st September 2014
+====================================
+  Restore proper buffer size for parsing mountinfo line (1.02.89)
+
+Version 1.02.89 - 26th August 2014
+==================================
+  Improve libdevmapper-event select() error handling.
+  Add extra check for matching transation_id after message submitting.
+  Add dm_report_field_string_list_unsorted for str. list report without sorting.
+  Support --deferred with dmsetup remove to defer removal of open devices.
+  Update dm-ioctl.h to include DM_DEFERRED_REMOVE flag.
+  Add support for selection to match string list subset, recognize { } operator.
+  Fix string list selection with '[value]' to not match list that's superset.
+  Fix string list selection to match whole words only, not prefixes.
+
 Version 1.02.88 - 5th August 2014
 =================================
   Add dm_tree_set_optional_uuid_suffixes to handle upgrades.

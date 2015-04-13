@@ -5,8 +5,6 @@ force-paths.patch
 #libdm-atomic.patch
 implicit-pointer.patch
 dm-event-api.patch
-monitoring-default-off.patch
-missing-dmeventd.patch
 udev.patch
 systemd.patch
 clvmd-openais-format.patch

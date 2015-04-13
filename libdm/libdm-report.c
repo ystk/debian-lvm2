@@ -131,6 +131,8 @@ static struct op_def _op_cmp[] = {
 #define SEL_LIST_MASK		0x000F0000
 #define SEL_LIST_LS		0x00010000
 #define SEL_LIST_LE		0x00020000
+#define SEL_LIST_SUBSET_LS	0x00040000
+#define SEL_LIST_SUBSET_LE	0x00080000
 
 static struct op_def _op_log[] = {
         { "&&", SEL_AND, "All fields must match" },
@@ -142,6 +144,8 @@ static struct op_def _op_log[] = {
         { ")", SEL_PRECEDENCE_PE, "Right parenthesis" },
         { "[", SEL_LIST_LS, "List start" },
         { "]", SEL_LIST_LE, "List end"},
+        { "{", SEL_LIST_SUBSET_LS, "List subset start"},
+        { "}", SEL_LIST_SUBSET_LE, "List subset end"},
         { NULL,  0, NULL},
 };
 
@@ -279,24 +283,6 @@ int dm_report_field_string(struct dm_report *rh,
 	return 1;
 }
 
-static int _str_cmp(const void *a, const void *b)
-{
-	const char **str_a = (const char **) a;
-	const char **str_b = (const char **) b;
-
-	return strcmp(*str_a, *str_b);
-}
-
-struct str_list_sort_value_item {
-	unsigned pos;
-	size_t len;
-};
-
-struct str_list_sort_value {
-	const char *value;
-	struct str_list_sort_value_item *items;
-};
-
 int dm_report_field_percent(struct dm_report *rh,
 			    struct dm_report_field *field,
 			    const dm_percent_t *data)
@@ -332,15 +318,39 @@ int dm_report_field_percent(struct dm_report *rh,
 	return 1;
 }
 
-int dm_report_field_string_list(struct dm_report *rh,
-				struct dm_report_field *field,
-				const struct dm_list *data,
-				const char *delimiter)
+struct str_list_sort_value_item {
+	unsigned pos;
+	size_t len;
+};
+
+struct str_list_sort_value {
+	const char *value;
+	struct str_list_sort_value_item *items;
+};
+
+struct str_list_sort_item {
+	const char *str;
+	struct str_list_sort_value_item item;
+};
+
+static int _str_list_sort_item_cmp(const void *a, const void *b)
+{
+	const struct str_list_sort_item *slsi_a = (const struct str_list_sort_item *) a;
+	const struct str_list_sort_item *slsi_b = (const struct str_list_sort_item *) b;
+
+	return strcmp(slsi_a->str, slsi_b->str);
+}
+
+static int _report_field_string_list(struct dm_report *rh,
+				     struct dm_report_field *field,
+				     const struct dm_list *data,
+				     const char *delimiter,
+				     int sort)
 {
 	static const char _string_list_grow_object_failed_msg[] = "dm_report_field_string_list: dm_pool_grow_object_failed";
 	struct str_list_sort_value *sort_value = NULL;
 	unsigned int list_size, pos, i;
-	const char **arr = NULL;
+	struct str_list_sort_item *arr = NULL;
 	struct dm_str_list *sl;
 	size_t delimiter_len, len;
 	void *object;
@@ -388,14 +398,10 @@ int dm_report_field_string_list(struct dm_report *rh,
 	}
 
 	/* more than one item - sort the list */
-	if (!(arr = dm_malloc(sizeof(char *) * list_size))) {
+	if (!(arr = dm_malloc(sizeof(struct str_list_sort_item) * list_size))) {
 		log_error("dm_report_field_string_list: dm_malloc failed");
 		goto out;
 	}
-	i = 0;
-	dm_list_iterate_items(sl, data)
-		arr[i++] = sl->str;
-	qsort(arr, i, sizeof(char *), _str_cmp);
 
 	if (!(dm_pool_begin_object(rh->mem, 256))) {
 		log_error(_string_list_grow_object_failed_msg);
@@ -406,21 +412,47 @@ int dm_report_field_string_list(struct dm_report *rh,
 		delimiter = ",";
 	delimiter_len = strlen(delimiter);
 
-	/* start from 1 - the item 0 stores the list size! */
-	for (i = 1, pos = 0; i <= list_size; i++) {
-		len = strlen(arr[i-1]);
-		if (!dm_pool_grow_object(rh->mem, arr[i-1], len) ||
-		    (i != list_size && !dm_pool_grow_object(rh->mem, delimiter, delimiter_len))) {
-			log_error(_string_list_grow_object_failed_msg);
-			goto out;
+	i = pos = len = 0;
+	dm_list_iterate_items(sl, data) {
+		arr[i].str = sl->str;
+		if (!sort) {
+			/* sorted outpud not required - report the list as it is */
+			len = strlen(sl->str);
+			if (!dm_pool_grow_object(rh->mem, arr[i].str, len) ||
+			    (i+1 != list_size && !dm_pool_grow_object(rh->mem, delimiter, delimiter_len))) {
+				log_error(_string_list_grow_object_failed_msg);
+				goto out;
+			}
+			arr[i].item.pos = pos;
+			arr[i].item.len = len;
+			pos = i+1 == list_size ? pos+len : pos+len+delimiter_len;
 		}
-		/*
-		 * save position and length of the string
-		 * element in report_string for sort_value
-		 */
-		sort_value->items[i].pos = pos;
-		sort_value->items[i].len = len;
-		pos = i == list_size ? pos+len : pos+len+delimiter_len;
+		i++;
+	}
+
+	qsort(arr, i, sizeof(struct str_list_sort_item), _str_list_sort_item_cmp);
+
+	for (i = 0, pos = 0; i < list_size; i++) {
+		if (sort) {
+			/* sorted output required - report the list as sorted */
+			len = strlen(arr[i].str);
+			if (!dm_pool_grow_object(rh->mem, arr[i].str, len) ||
+			    (i+1 != list_size && !dm_pool_grow_object(rh->mem, delimiter, delimiter_len))) {
+				log_error(_string_list_grow_object_failed_msg);
+				goto out;
+			}
+			/*
+			 * Save position and length of the string
+			 * element in report_string for sort_value.
+			 * Use i+1 here since items[0] stores list size!!!
+			 */
+			sort_value->items[i+1].pos = pos;
+			sort_value->items[i+1].len = len;
+			pos = i+1 == list_size ? pos+len : pos+len+delimiter_len;
+		} else {
+			sort_value->items[i+1].pos = arr[i].item.pos;
+			sort_value->items[i+1].len = arr[i].item.len;
+		}
 	}
 
 	if (!dm_pool_grow_object(rh->mem, "\0", 1)) {
@@ -439,6 +471,27 @@ out:
 	if (arr)
 		dm_free(arr);
 	return r;
+}
+
+int dm_report_field_string_list(struct dm_report *rh,
+				struct dm_report_field *field,
+				const struct dm_list *data,
+				const char *delimiter)
+{
+	return _report_field_string_list(rh, field, data, delimiter, 1);
+}
+
+int dm_report_field_string_list_unsorted(struct dm_report *rh,
+					 struct dm_report_field *field,
+					 const struct dm_list *data,
+					 const char *delimiter)
+{
+	/*
+	 * The raw value is always sorted, just the string reported is unsorted.
+	 * Having the raw value always sorted helps when matching selection list
+	 * with selection criteria.
+	 */
+	return _report_field_string_list(rh, field, data, delimiter, 0);
 }
 
 int dm_report_field_int(struct dm_report *rh,
@@ -1247,9 +1300,9 @@ static int _cmp_field_string(const char *field_id, const char *a, const char *b,
 	return 0;
 }
 
-/* Matches if all items from selection string list match. */
-static int _cmp_field_string_list_all(const struct str_list_sort_value *val,
-				      const struct selection_str_list *sel)
+/* Matches if all items from selection string list match list value strictly 1:1. */
+static int _cmp_field_string_list_strict_all(const struct str_list_sort_value *val,
+					     const struct selection_str_list *sel)
 {
 	struct dm_str_list *sel_item;
 	unsigned int i = 1;
@@ -1260,7 +1313,8 @@ static int _cmp_field_string_list_all(const struct str_list_sort_value *val,
 
 	/* both lists are sorted so they either match 1:1 or not */
 	dm_list_iterate_items(sel_item, sel->list) {
-		if (strncmp(sel_item->str, val->value + val->items[i].pos, val->items[i].len))
+		if ((strlen(sel_item->str) != val->items[i].len) ||
+		    strncmp(sel_item->str, val->value + val->items[i].pos, val->items[i].len))
 			return 0;
 		i++;
 	}
@@ -1268,7 +1322,36 @@ static int _cmp_field_string_list_all(const struct str_list_sort_value *val,
 	return 1;
 }
 
-/* Matches if any item from selection string list matches. */
+/* Matches if all items from selection string list match a subset of list value. */
+static int _cmp_field_string_list_subset_all(const struct str_list_sort_value *val,
+					     const struct selection_str_list *sel)
+{
+	struct dm_str_list *sel_item;
+	unsigned int i, last_found = 1;
+	int r = 0;
+
+	/* if value has no items and selection has at leas one, it's clear there's no match */
+	if ((val->items[0].len == 0) && dm_list_size(sel->list))
+		return 0;
+
+	/* Check selection is a subset of the value. */
+	dm_list_iterate_items(sel_item, sel->list) {
+		r = 0;
+		for (i = last_found; i <= val->items[0].len; i++) {
+			if ((strlen(sel_item->str) == val->items[i].len) &&
+			    !strncmp(sel_item->str, val->value + val->items[i].pos, val->items[i].len)) {
+				last_found = i;
+				r = 1;
+			}
+		}
+		if (!r)
+			break;
+	}
+
+	return r;
+}
+
+/* Matches if any item from selection string list matches list value. */
 static int _cmp_field_string_list_any(const struct str_list_sort_value *val,
 				      const struct selection_str_list *sel)
 {
@@ -1285,7 +1368,8 @@ static int _cmp_field_string_list_any(const struct str_list_sort_value *val,
 		 *       Make use of the fact that the lists are sorted!
 		 */
 		for (i = 1; i <= val->items[0].len; i++) {
-			if (!strncmp(sel_item->str, val->value + val->items[i].pos, val->items[i].len))
+			if ((strlen(sel_item->str) == val->items[i].len) &&
+			    !strncmp(sel_item->str, val->value + val->items[i].pos, val->items[i].len))
 				return 1;
 		}
 	}
@@ -1297,11 +1381,24 @@ static int _cmp_field_string_list(const char *field_id,
 				  const struct str_list_sort_value *value,
 				  const struct selection_str_list *selection, uint32_t flags)
 {
-	int r;
+	int subset, r;
+
+	switch (selection->type & SEL_LIST_MASK) {
+		case SEL_LIST_LS:
+			subset = 0;
+			break;
+		case SEL_LIST_SUBSET_LS:
+			subset = 1;
+			break;
+		default:
+			log_error(INTERNAL_ERROR "_cmp_field_string_list: unknown list type");
+			return 0;
+	}
 
 	switch (selection->type & SEL_MASK) {
 		case SEL_AND:
-			r = _cmp_field_string_list_all(value, selection);
+			r = subset ? _cmp_field_string_list_subset_all(value, selection)
+				   : _cmp_field_string_list_strict_all(value, selection);
 			break;
 		case SEL_OR:
 			r = _cmp_field_string_list_any(value, selection);
@@ -1624,7 +1721,7 @@ static const char *_tok_value_number(const char *s,
 	int is_float = 0;
 
 	*begin = s;
-	while (*s && ((!is_float && *s=='.' && (is_float=1)) || isdigit(*s)))
+	while ((!is_float && (*s == '.') && ((is_float = 1))) || isdigit(*s))
 		s++;
 	*end = s;
 
@@ -1930,11 +2027,11 @@ static const char *_tok_value_string_list(const struct dm_report_field_type *ft,
 	struct selection_str_list *ssl = NULL;
 	struct dm_str_list *item;
 	const char *begin_item, *end_item, *tmp;
-	uint32_t end_op_flags, end_op_flag_hit = 0;
+	uint32_t op_flags, end_op_flag_expected, end_op_flag_hit = 0;
 	struct dm_str_list **arr;
 	size_t list_size;
 	unsigned int i;
-	int list_end;
+	int list_end = 0;
 	char c;
 
 	if (!(ssl = dm_pool_alloc(mem, sizeof(*ssl))) ||
@@ -1946,8 +2043,8 @@ static const char *_tok_value_string_list(const struct dm_report_field_type *ft,
 	ssl->type = 0;
 	*begin = s;
 
-	if (!_tok_op_log(s, &tmp, SEL_LIST_LS)) {
-		/* Only one item - SEL_LIST_LS and SEL_LIST_LE not used */
+	if (!(op_flags = _tok_op_log(s, &tmp, SEL_LIST_LS | SEL_LIST_SUBSET_LS))) {
+		/* Only one item - SEL_LIST_{SUBSET_}LS and SEL_LIST_{SUBSET_}LE not used */
 		c = _get_and_skip_quote_char(&s);
 		if (!(s = _tok_value_string(s, &begin_item, &end_item, c, SEL_AND | SEL_OR | SEL_PRECEDENCE_PE, NULL))) {
 			log_error(_str_list_item_parsing_failed, ft->id);
@@ -1955,32 +2052,47 @@ static const char *_tok_value_string_list(const struct dm_report_field_type *ft,
 		}
 		if (!_add_item_to_string_list(mem, begin_item, end_item, ssl->list))
 			goto_bad;
-		ssl->type = SEL_OR;
+		ssl->type = SEL_OR | SEL_LIST_LS;
 		goto out;
 	}
 
-	/* More than one item - items enclosed in SEL_LIST_LS and SEL_LIST_LE.
+	/* More than one item - items enclosed in SEL_LIST_LS and SEL_LIST_LE
+	 * or SEL_LIST_SUBSET_LS and SEL_LIST_SUBSET_LE.
 	 * Each element is terminated by AND or OR operator or 'list end'.
 	 * The first operator hit is then the one allowed for the whole list,
 	 * no mixing allowed!
 	 */
-	end_op_flags = SEL_LIST_LE | SEL_AND | SEL_OR;
+
+	/* Are we using [] or {} for the list? */
+	end_op_flag_expected = (op_flags == SEL_LIST_LS) ? SEL_LIST_LE : SEL_LIST_SUBSET_LE;
+
+	op_flags = SEL_LIST_LE | SEL_LIST_SUBSET_LE | SEL_AND | SEL_OR;
 	s++;
 	while (*s) {
 		s = _skip_space(s);
 		c = _get_and_skip_quote_char(&s);
-		if (!(s = _tok_value_string(s, &begin_item, &end_item, c, end_op_flags, NULL))) {
+		if (!(s = _tok_value_string(s, &begin_item, &end_item, c, op_flags, NULL))) {
 			log_error(_str_list_item_parsing_failed, ft->id);
 			goto bad;
 		}
 		s = _skip_space(s);
 
-		if (!(end_op_flag_hit = _tok_op_log(s, &tmp, end_op_flags))) {
+		if (!(end_op_flag_hit = _tok_op_log(s, &tmp, op_flags))) {
 			log_error("Invalid operator in selection list.");
 			goto bad;
 		}
 
-		list_end = end_op_flag_hit == SEL_LIST_LE;
+		if (end_op_flag_hit & (SEL_LIST_LE | SEL_LIST_SUBSET_LE)) {
+			list_end = 1;
+			if (end_op_flag_hit != end_op_flag_expected) {
+				for (i = 0; _op_log[i].string; i++)
+					if (_op_log[i].flags == end_op_flag_expected)
+						break;
+				log_error("List ended with incorrect character, "
+					  "expecting \'%s\'.", _op_log[i].string);
+				goto bad;
+			}
+		}
 
 		if (ssl->type) {
 			if (!list_end && !(ssl->type & end_op_flag_hit)) {
@@ -1988,8 +2100,12 @@ static const char *_tok_value_string_list(const struct dm_report_field_type *ft,
 					  "in selection list at a time.");
 				goto bad;
 			}
-		} else
-			ssl->type = list_end ? SEL_OR : end_op_flag_hit;
+		} else {
+			if (list_end)
+				ssl->type = end_op_flag_expected == SEL_LIST_LE ? SEL_AND : SEL_OR;
+			else
+				ssl->type = end_op_flag_hit;
+		}
 
 		if (!_add_item_to_string_list(mem, begin_item, end_item, ssl->list))
 			goto_bad;
@@ -2000,10 +2116,16 @@ static const char *_tok_value_string_list(const struct dm_report_field_type *ft,
 			break;
 	}
 
-	if (end_op_flag_hit != SEL_LIST_LE) {
+	if (!(end_op_flag_hit & (SEL_LIST_LE | SEL_LIST_SUBSET_LE))) {
 		log_error("Missing list end for selection field %s", ft->id);
 		goto bad;
 	}
+
+	/* Store information whether [] or {} was used. */
+	if (end_op_flag_expected == SEL_LIST_LE)
+		ssl->type |= SEL_LIST_LS;
+	else
+		ssl->type |= SEL_LIST_SUBSET_LS;
 
 	/* Sort the list. */
 	if (!(list_size = dm_list_size(ssl->list))) {

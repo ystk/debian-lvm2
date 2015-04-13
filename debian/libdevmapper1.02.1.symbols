@@ -150,6 +150,7 @@ libdevmapper.so.1.02.1 libdevmapper1.02.1 #MINVER#
  dm_report_field_set_value@Base 2:1.02.27
  dm_report_field_string@Base 2:1.02.27
  dm_report_field_string_list@Base 2:1.02.88
+ dm_report_field_string_list_unsorted@Base 2:1.02.90
  dm_report_field_uint32@Base 2:1.02.27
  dm_report_field_uint64@Base 2:1.02.27
  dm_report_free@Base 2:1.02.27
@@ -171,11 +172,13 @@ libdevmapper.so.1.02.1 libdevmapper1.02.1 #MINVER#
  dm_sysfs_dir@Base 2:1.02.74
  dm_task_add_target@Base 2:1.02.20
  dm_task_create@Base 2:1.02.20
+ dm_task_deferred_remove@Base 2:1.02.90
  dm_task_destroy@Base 2:1.02.20
  dm_task_enable_checks@Base 2:1.02.65
  dm_task_get_deps@Base 2:1.02.20
  dm_task_get_driver_version@Base 2:1.02.20
  dm_task_get_info@Base 2:1.02.20
+ dm_task_get_info_with_deferred_remove@Base 2:1.02.90
  dm_task_get_message_response@Base 2:1.02.82
  dm_task_get_name@Base 2:1.02.20
  dm_task_get_name_mangled@Base 2:1.02.74

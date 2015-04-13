@@ -117,9 +117,8 @@ struct logical_volume *lv_cache_create(struct logical_volume *pool,
 		 * The origin under the origin would become *_corig_corig
 		 * before renaming the origin above to *_corig.
 		 */
-		log_error(INTERNAL_ERROR
-			  "The origin, %s, cannot be of cache type",
-			  origin->name);
+		log_error("Creating a cache LV from an existing cache LV is"
+			  "not yet supported.");
 		return NULL;
 	}
 
@@ -313,4 +312,17 @@ int get_cache_mode(const char *str, uint32_t *flags)
 	}
 
 	return 1;
+}
+
+int lv_is_cache_origin(const struct logical_volume *lv)
+{
+	struct lv_segment *seg;
+
+	/* Make sure there's exactly one segment in segs_using_this_lv! */
+	if (dm_list_empty(&lv->segs_using_this_lv) ||
+	    (dm_list_size(&lv->segs_using_this_lv) > 1))
+		return 0;
+
+	seg = get_only_segment_using_this_lv(lv);
+	return seg && lv_is_cache(seg->lv) && (seg_lv(seg, 0) == lv);
 }

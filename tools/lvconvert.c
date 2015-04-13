@@ -110,8 +110,13 @@ static int _lvconvert_name_params(struct lvconvert_params *lp,
 	char *ptr;
 	const char *vg_name = NULL;
 
-	if (lp->merge)
+	if (lp->merge) {
+		if (!*pargc) {
+			log_error("Please specify a logical volume path.");
+			return 0;
+		}
 		return 1;
+	}
 
 	if (!*pargc) {
 		if (lp->cache) {
@@ -342,9 +347,6 @@ static int _read_params(struct lvconvert_params *lp, struct cmd_context *cmd,
 	int region_size;
 	int pagesize = lvm_getpagesize();
 	const char *type_str = arg_str_value(cmd, type_ARG, "");
-
-	memset(lp, 0, sizeof(*lp));
-	lp->target_attr = ~0;
 
 	if (!_check_conversion_type(cmd, type_str))
 		return_0;
@@ -2215,8 +2217,9 @@ static int _lvconvert_merge_old_snapshot(struct cmd_context *cmd,
 		if (!vg_commit(lv->vg))
 			return_0;
 		r = 1;
-		log_print_unless_silent("Merging of snapshot %s will start "
-					"next activation.", lv->name);
+		log_print_unless_silent("Merging of snapshot %s will occur on "
+					"next activation of %s.",
+					display_lvname(lv), display_lvname(origin));
 		goto out;
 	}
 
@@ -2323,7 +2326,8 @@ static int _lvconvert_merge_thin_snapshot(struct cmd_context *cmd,
 		return_0;
 
 	log_print_unless_silent("Merging of thin snapshot %s will occur on "
-				"next activation.", lv->name);
+				"next activation of %s.",
+				display_lvname(lv), display_lvname(origin));
 	r = 1;
 out:
 	backup(lv->vg);
@@ -2714,8 +2718,8 @@ static int _lvconvert_pool(struct cmd_context *cmd,
 		}
 		if (lv_is_thin_type(metadata_lv) ||
 		    lv_is_cache_type(metadata_lv)) {
-			log_error("Can't use %s LV %s for pool metadata.",
-				  lv_type_name(metadata_lv), display_lvname(metadata_lv));
+			log_error("Can't use thin or cache type LV %s for pool metadata.",
+				  display_lvname(metadata_lv));
 			return 0;
 		}
 
@@ -2818,16 +2822,15 @@ static int _lvconvert_pool(struct cmd_context *cmd,
 
 		if (!lp->yes &&
 		    yes_no_prompt("Do you want to swap metadata of %s "
-				  "pool with %s volume %s? [y/n]: ",
+				  "pool with metadata volume %s? [y/n]: ",
 				  display_lvname(pool_lv),
-				  lv_type_name(metadata_lv),
 				  display_lvname(metadata_lv)) == 'n') {
 			log_error("Conversion aborted.");
 			return 0;
 		}
 	} else if (lv_is_thin_type(pool_lv)) {
-		log_error("Can't use %s logical volume %s for thin pool data.",
-			  lv_type_name(pool_lv), display_lvname(pool_lv));
+		log_error("Can't use thin type logical volume %s for thin pool data.",
+			  display_lvname(pool_lv));
 		return 0;
 	} else {
 		log_warn("WARNING: Converting logical volume %s%s%s to pool's data%s.",
@@ -3043,8 +3046,8 @@ static int _lvconvert_cache(struct cmd_context *cmd,
 	}
 
 	if (lv_is_pool(origin) || lv_is_cache_type(origin)) {
-		log_error("Can't cache %s volume %s.",
-			  lv_type_name(origin), display_lvname(origin));
+		log_error("Can't cache pool or cache type volume %s.",
+			  display_lvname(origin));
 		return 0;
 	}
 
@@ -3214,7 +3217,7 @@ static int _poll_logical_volume(struct cmd_context *cmd, struct logical_volume *
 
 static int lvconvert_single(struct cmd_context *cmd, struct lvconvert_params *lp)
 {
-	struct logical_volume *lv = NULL;
+	struct logical_volume *lv;
 	int ret = ECMD_FAILED;
 	int saved_ignore_suspended_devices = ignore_suspended_devices();
 
@@ -3261,8 +3264,8 @@ static int _lvconvert_merge_single(struct cmd_context *cmd, struct logical_volum
 				  void *handle)
 {
 	struct lvconvert_params *lp = handle;
-	const char *vg_name = NULL;
-	struct logical_volume *refreshed_lv = NULL;
+	const char *vg_name;
+	struct logical_volume *refreshed_lv;
 	int ret;
 
 	/*
@@ -3308,21 +3311,18 @@ static int _lvconvert_merge_single(struct cmd_context *cmd, struct logical_volum
 
 int lvconvert(struct cmd_context * cmd, int argc, char **argv)
 {
-	struct lvconvert_params lp;
+	struct lvconvert_params lp = {
+		.target_attr = ~0,
+	};
 
 	if (!_read_params(&lp, cmd, argc, argv)) {
 		stack;
 		return EINVALID_CMD_LINE;
 	}
 
-	if (lp.merge) {
-		if (!argc) {
-			log_error("Please provide logical volume path");
-			return EINVALID_CMD_LINE;
-		}
+	if (lp.merge)
 		return process_each_lv(cmd, argc, argv, READ_FOR_UPDATE, &lp,
 				       &_lvconvert_merge_single);
-	}
 
 	return lvconvert_single(cmd, &lp);
 }

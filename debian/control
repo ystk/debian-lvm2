@@ -11,7 +11,7 @@ Vcs-Browser: http://svn.debian.org/wsvn/pkg-lvm/lvm2/trunk/
 
 Package: lvm2
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, lsb-base, dmsetup (>> 2:1.02.47), initscripts (>= 2.88dsf-13.3)
+Depends: ${shlibs:Depends}, ${misc:Depends}, lsb-base, dmsetup (>> 2:1.02.47), dmeventd (>> 2:1.02.90), initscripts (>= 2.88dsf-13.3)
 Suggests: thin-provisioning-tools
 Breaks: initramfs-tools (<< 0.99), thin-provisioning-tools (<< 0.3.2)
 Multi-Arch: foreign
@@ -169,7 +169,7 @@ Package: liblvm2cmd2.02
 Section: libs
 Architecture: any
 Pre-Depends: ${misc:Pre-Depends}
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends: ${shlibs:Depends}, ${misc:Depends}, dmeventd (>> 2:1.02.90)
 Multi-Arch: same
 Description: LVM2 command library
  This package contains the lvm2cmd shared library.

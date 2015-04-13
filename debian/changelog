@@ -1,3 +1,31 @@
+lvm2 (2.02.111-2.1) unstable; urgency=medium
+
+  * Non-maintainer upload
+  * Add initramfs-tools boot script for preparing additional block
+    devices (Closes: #775583)
+
+ -- Ben Hutchings <ben@decadent.org.uk>  Sun, 01 Mar 2015 21:19:37 +0000
+
+lvm2 (2.02.111-2) unstable; urgency=medium
+
+  * Install additional man-pages. (closes: #587277, #760679)
+  * Remove re-start of non-existing systemd unit. (closes: #760682)
+  * Add dm-raid support to initramfs. (closes: #699804)
+  * Fix version in one symbols. (closes: #762705)
+
+ -- Bastian Blank <waldi@debian.org>  Thu, 25 Sep 2014 21:04:41 +0200
+
+lvm2 (2.02.111-1) unstable; urgency=medium
+
+  * New upstream version.
+  * Install more systemd units:
+    - Add dm-event.service and dm-event.socket to dmeventd.
+    - Add lvm2-monitor.service to lvm2 and start it.
+  * Enable monitoring by default:
+    - Add dependency on dmeventd to lvm2 and liblvm2cmd2.02.
+
+ -- Bastian Blank <waldi@debian.org>  Sat, 06 Sep 2014 19:26:39 +0200
+
 lvm2 (2.02.109-1) unstable; urgency=medium
 
   * New upstream version.
