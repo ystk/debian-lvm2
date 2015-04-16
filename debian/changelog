@@ -1,3 +1,10 @@
+lvm2 (2.02.111-2.2) unstable; urgency=medium
+
+  * Non-maintainer upload
+  * Add support for /dev/VG/LV naming in initramfs (Closes: #780319)
+
+ -- Ben Hutchings <ben@decadent.org.uk>  Fri, 10 Apr 2015 01:43:39 +0100
+
 lvm2 (2.02.111-2.1) unstable; urgency=medium
 
   * Non-maintainer upload
