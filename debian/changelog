@@ -1,3 +1,9 @@
+lvm2 (2.02.111-2.2+deb8u1) jessie; urgency=medium
+
+  * Set default pid directory to /run. (closes: #783120)
+
+ -- Bastian Blank <waldi@debian.org>  Fri, 27 May 2016 09:04:17 +0000
+
 lvm2 (2.02.111-2.2) unstable; urgency=medium
 
   * Non-maintainer upload

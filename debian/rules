@@ -82,7 +82,9 @@ $(STAMPS_DIR)/setup_deb: $(STAMPS_DIR)/source
 		--with-device-gid=6 \
 		--with-device-mode=0660 \
 		--with-default-run-dir=/run/lvm \
+		--with-default-dm-run-dir=/run \
 		--with-default-locking-dir=/run/lock/lvm \
+		--with-default-pid-dir=/run \
 		--with-thin=internal \
 		--with-thin-check=/usr/sbin/thin_check \
 		--with-thin-dump=/usr/sbin/thin_dump \
